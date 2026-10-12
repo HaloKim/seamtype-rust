@@ -10,7 +10,7 @@ use windows::Win32::UI::TextServices::{
     ITextStoreACP, ITextStoreACPSink, ITextStoreACP_Impl, ITfCompositionView, ITfContextOwnerCompositionSink,
     ITfContextOwnerCompositionSink_Impl, ITfRange, TEXT_STORE_LOCK_FLAGS, TEXT_STORE_TEXT_CHANGE_FLAGS, TS_AE_END,
     TS_ATTRVAL, TS_E_SYNCHRONOUS, TS_IAS_QUERYONLY, TS_LF_SYNC, TS_RT_PLAIN, TS_RUNINFO, TS_SELECTIONSTYLE,
-    TS_SELECTION_ACP, TS_SS_NOHIDDENTEXT, TS_STATUS, TS_S_ASYNC, TS_TEXTCHANGE,
+    TS_SELECTION_ACP, TS_SS_NOHIDDENTEXT, TS_SS_TRANSITORY, TS_STATUS, TS_S_ASYNC, TS_TEXTCHANGE,
 };
 use windows_core::{implement, IUnknown, Interface, Ref, Result, BOOL, GUID, HRESULT, PCWSTR, PWSTR};
 
@@ -28,11 +28,19 @@ pub struct Store {
     queued: Cell<u32>,
     /// Compositions in progress (TSF tells the owner).
     pub compositions: Cell<i32>,
+    /// Reports itself as transitory, as Windows' IMM32 bridge does for apps that aren't TSF-aware.
+    pub transitory: Cell<bool>,
 }
 
 impl Store {
     pub fn new() -> Store {
-        Store { inner: RefCell::new(Inner::default()), locked: Cell::new(0), queued: Cell::new(0), compositions: Cell::new(0) }
+        Store {
+            inner: RefCell::new(Inner::default()),
+            locked: Cell::new(0),
+            queued: Cell::new(0),
+            compositions: Cell::new(0),
+            transitory: Cell::new(false),
+        }
     }
 
     pub fn text(&self) -> String {
@@ -138,7 +146,8 @@ impl ITextStoreACP_Impl for Store_Impl {
     }
 
     fn GetStatus(&self) -> Result<TS_STATUS> {
-        Ok(TS_STATUS { dwDynamicFlags: 0, dwStaticFlags: TS_SS_NOHIDDENTEXT })
+        let transitory = if self.transitory.get() { TS_SS_TRANSITORY } else { 0 };
+        Ok(TS_STATUS { dwDynamicFlags: 0, dwStaticFlags: TS_SS_NOHIDDENTEXT | transitory })
     }
 
     fn QueryInsert(&self, start: i32, end: i32, _cch: u32, result_start: *mut i32, result_end: *mut i32) -> Result<()> {

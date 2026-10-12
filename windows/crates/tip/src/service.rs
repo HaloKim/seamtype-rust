@@ -31,10 +31,10 @@ use windows::Win32::UI::TextServices::{
 };
 use windows_core::{implement, ComObject, Error, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, GUID};
 
-use crate::client::{variant_as_i32, variant_i4, TsfClient};
+use crate::client::{variant_as_i32, variant_i4, ImmWord, TsfClient};
 use crate::display::{AttributeEnum, InputAttribute};
 use crate::langbar::LangBarButton;
-use crate::{edit, keys, runtime, strings, GUID_DISPLAY_ATTRIBUTE_INPUT, GUID_PRESERVED_PAUSE};
+use crate::{edit, inject, keys, runtime, strings, GUID_DISPLAY_ATTRIBUTE_INPUT, GUID_PRESERVED_PAUSE};
 
 #[derive(Default)]
 pub struct State {
@@ -55,7 +55,16 @@ pub struct State {
     last_event: Option<Instant>,
     /// The document whose kind was logged last.
     logged_context: usize,
+    /// The word's share an IMM32 app already has (see client.rs).
+    imm: ImmWord,
+    /// The key being handled is Backspace (an IMM32 app may get it, to erase a character it has).
+    handling_backspace: bool,
+    /// Backspaces Seamtype sent are on their way, until its marker comes back (or a moment passes).
+    replacing: Option<Instant>,
 }
+
+/// How long Backspaces Seamtype sent may take to come back.
+const REPLACING_WINDOW: Duration = Duration::from_millis(1500);
 
 /// A key press the session handled.
 struct KeyPress {
@@ -261,16 +270,31 @@ impl TextService_Impl {
         let out: Rc<RefCell<Option<R>>> = Rc::new(RefCell::new(None));
         let result = out.clone();
         let ime = runtime::get().ime;
+        // An IMM32 app's document (through Windows' bridge) composes one character at a time.
+        let transitory =
+            unsafe { context.GetStatus() }.map(|s| s.dwStaticFlags & TS_SS_TRANSITORY != 0).unwrap_or(false);
         let ran = edit::sync_write(context, self.client_id(), move |ec| {
             let mut guard = this.state.try_borrow_mut().map_err(|_| Error::from(E_UNEXPECTED))?;
             let state = &mut *guard;
             let mut composition = state.composition.take();
+            let mut imm = std::mem::take(&mut state.imm);
             let atom = state.atom;
+            let backspace = state.handling_backspace;
             let value = {
-                let mut client = TsfClient { ec, context: &ctx, composition: &mut composition, sink: &sink, atom, ime };
+                let mut client = TsfClient {
+                    ec,
+                    context: &ctx,
+                    composition: &mut composition,
+                    sink: &sink,
+                    atom,
+                    ime,
+                    imm: if transitory { Some(&mut imm) } else { None },
+                    backspace,
+                };
                 f(state, &mut client)
             };
             state.composition = composition;
+            state.imm = imm;
             *result.borrow_mut() = Some(value);
             Ok(())
         });
@@ -306,6 +330,10 @@ impl TextService_Impl {
             });
             crate::log!("finished: {}", done.is_some());
             if done.is_some() && self.state.borrow().composition.is_none() {
+                // Characters an IMM32 app has can't be fixed once focus moved on.
+                let mut state = self.state.borrow_mut();
+                state.imm = ImmWord::default();
+                state.replacing = None;
                 return;
             }
         }
@@ -316,6 +344,8 @@ impl TextService_Impl {
             }
         }
         state.composition = None;
+        state.imm = ImmWord::default();
+        state.replacing = None;
     }
 
     fn classify(&self, context: &ITfContext, vk: u32) -> KeyAction {
@@ -413,14 +443,81 @@ impl TextService_Impl {
                         self.finish_composition();
                     }
                 }
+                if let Ok(mut state) = self.state.try_borrow_mut() {
+                    state.handling_backspace = key == Key::Delete;
+                }
                 let handled = self
                     .edit(context, move |state, client| {
                         TextService::refresh_session(state, Some(client));
                         state.session.as_mut().map(|s| s.handle(key, client)).unwrap_or(false)
                     })
                     .unwrap_or(false);
+                if let Ok(mut state) = self.state.try_borrow_mut() {
+                    state.handling_backspace = false;
+                }
+                if self.after_edit() {
+                    // The app's Backspace erases a character it already has.
+                    return false;
+                }
                 handled
             }
+        }
+    }
+
+    /// After an edit in an IMM32 app's document: sends the Backspaces a change needs; true when
+    /// the key being handled is a Backspace the app should get.
+    fn after_edit(&self) -> bool {
+        let Ok(mut state) = self.state.try_borrow_mut() else { return false };
+        let pass = std::mem::take(&mut state.imm.pass_key);
+        let erase = state.imm.pending.as_ref().map(|p| p.erase);
+        if erase.is_some() {
+            state.replacing = Some(Instant::now());
+        }
+        drop(state);
+        if let Some(erase) = erase {
+            inject::erase_then_mark(erase);
+        }
+        pass
+    }
+
+    /// Keys Seamtype sent itself: Some(eaten) for its Backspaces (the app's) and its marker.
+    fn injected(&self, context: &ITfContext, vk: u32, down: bool) -> Option<bool> {
+        if vk != inject::MARKER && vk != inject::BACKSPACE {
+            return None;
+        }
+        let in_flight = self
+            .state
+            .try_borrow()
+            .map(|s| s.replacing.map(|t| t.elapsed() < REPLACING_WINDOW).unwrap_or(false))
+            .unwrap_or(false);
+        if !(inject::is_ours() || in_flight) {
+            return None;
+        }
+        if vk == inject::BACKSPACE {
+            return Some(false);
+        }
+        if down {
+            self.finish_replacement(context);
+        }
+        Some(true)
+    }
+
+    /// The marker came back: the app erased what it had to, so the word goes on.
+    fn finish_replacement(&self, context: &ITfContext) {
+        let pending = self.state.try_borrow_mut().ok().and_then(|mut s| {
+            s.replacing = None;
+            if !s.eaten.contains(&inject::MARKER) {
+                s.eaten.push(inject::MARKER);
+            }
+            s.imm.pending.take()
+        });
+        if let Some(pending) = pending {
+            crate::log!("imm: erased, the word goes on");
+            self.edit(context, move |_state, client| {
+                if let Err(e) = client.finish_pending(pending) {
+                    crate::log!("imm: could not go on: {e}");
+                }
+            });
         }
     }
 
@@ -447,6 +544,7 @@ impl TextService_Impl {
             }
             state.composition = None;
         }
+        self.after_edit();
         crate::log!("paused={}", self.is_paused());
         self.update_langbar();
     }
@@ -474,6 +572,7 @@ impl TextService_Impl {
         let context = self.composition_context();
         if let Some(context) = context {
             self.edit(&context, |state, client| TextService::refresh_session(state, Some(client)));
+            self.after_edit();
         } else if let Ok(mut state) = self.state.try_borrow_mut() {
             TextService::refresh_session(&mut state, None);
         }
@@ -568,6 +667,8 @@ impl TextService_Impl {
         state.session = None;
         state.composition = None;
         state.eaten.clear();
+        state.imm = ImmWord::default();
+        state.replacing = None;
         crate::log!("deactivated");
         Ok(())
     }
@@ -600,6 +701,10 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         crate::guard(|| {
             let vk = wparam.0 as u32;
             let Some(context) = context.as_ref() else { return Ok(false.into()) };
+            if let Some(eaten) = self.injected(context, vk, false) {
+                self.trace("test-down", vk, lparam, "Seamtype's own key");
+                return Ok(eaten.into());
+            }
             self.note_context(context);
             if let Some(eaten) = self.duplicate(vk, lparam) {
                 self.trace("test-down", vk, lparam, "again: same press");
@@ -615,6 +720,10 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         crate::guard(|| {
             let vk = wparam.0 as u32;
             let Some(context) = context.as_ref() else { return Ok(false.into()) };
+            if let Some(eaten) = self.injected(context, vk, true) {
+                self.trace("down", vk, lparam, "Seamtype's own key");
+                return Ok(eaten.into());
+            }
             if let Some(eaten) = self.duplicate(vk, lparam) {
                 self.trace("down", vk, lparam, "again: same press, not handled twice");
                 return Ok(eaten.into());
@@ -708,6 +817,8 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
                     session.activate(Some(runtime::app_id()));
                 }
                 state.eaten.clear();
+                state.imm = ImmWord::default();
+                state.replacing = None;
             }
             self.update_langbar();
             Ok(())
@@ -757,6 +868,8 @@ impl ITfCompositionSink_Impl for TextService_Impl {
                 }
             }
             state.composition = None;
+            state.imm = ImmWord::default();
+            state.replacing = None;
             if let Some(session) = state.session.as_mut() {
                 session.abandon();
             }

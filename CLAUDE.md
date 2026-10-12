@@ -154,6 +154,14 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1   # build, copy to 
   harness calls the key and focus sinks itself; edit sessions and compositions are TSF's own.
 - Settings changes reach other processes through the files' modification times (no distributed
   notifications on Windows); `LearningEngine` reads lexicon.json back before writing.
+- Apps that aren't TSF-aware (Webex and other Qt apps, Win32 edit controls) reach TSF through
+  Windows' IMM32 bridge (CUAS), whose documents are transitory. Under a Korean profile it follows
+  Korean IME rules: the keyboard must be open in native mode on the thread manager's compartments
+  (not the global ones), only the last character composes (an interim character) and everything
+  before it goes to the app as typed. `ImmWord` in client.rs composes such words one character at
+  a time and never sends delivered text again; changing it means injected Backspaces (with
+  `inject::MAGIC`) and a marker key (F24) that resumes the word. The harness covers it with a
+  transitory store and an injector hook.
 - Some apps hand each key press to the text service twice (Webex, a Qt app reaching TSF through
   Windows' IMM32 bridge, typed `ddkkssss…`): a key-down with the same key and lParam as the last
   one, before its key-up and not auto-repeat, is the same press (`DUPLICATE_WINDOW`).

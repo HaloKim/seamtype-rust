@@ -52,6 +52,15 @@ The menu has: pause in this text field, the app's settings (convert words, Norma
 app, use the default), Japanese input, undo the last learned word, forget all remembered words, and open
 the settings folder.
 
+## IMM32 apps (Webex and others)
+
+Apps that aren't TSF-aware (Qt apps such as Webex, older Win32 apps) go through Windows' IMM32
+bridge, which applies Korean IME rules to a Korean input method: only the last character is
+composed. There Seamtype composes like the system's Korean input, the last character underlined and
+the ones before it typed. Decisions are still per word: when a word changes reading mid-way (Esc, a
+split decided late), the characters already typed are erased with Backspace and typed again. Esc
+right after a commit can't change the word in these apps (their text can't be read back).
+
 ## Not yet
 
 - **Kanji.** macOS converts with AzooKey's dictionary (Swift). On Windows, Japanese stops at kana: Space

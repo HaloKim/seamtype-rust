@@ -206,9 +206,15 @@ impl Harness {
 
     /// A new, focused text field.
     fn document(&self) -> Result<Document> {
+        self.document_with(false)
+    }
+
+    /// A new, focused text field; `transitory` makes it an IMM32 app's, as Windows bridges them.
+    fn document_with(&self, transitory: bool) -> Result<Document> {
         unsafe {
             let manager = self.thread_mgr.CreateDocumentMgr()?;
             let store = ComObject::new(Store::new());
+            store.transitory.set(transitory);
             let unknown: IUnknown = store.to_interface::<ITextStoreACP>().cast()?;
             let mut context = None;
             let mut cookie = 0u32;
@@ -304,7 +310,32 @@ impl Harness {
             }
         }
         self.set_shift(false);
+        // Backspaces the text service sent (to an IMM32 app): the app erases, then the marker.
+        let injected: Vec<usize> = std::mem::take(&mut *INJECTED.lock().unwrap());
+        for count in injected {
+            for _ in 0..count {
+                document.store.app_backspace();
+            }
+            self.marker(document);
+        }
         eaten
+    }
+
+    /// Seamtype's marker key coming back.
+    fn marker(&self, document: &Document) {
+        let wparam = WPARAM(VK_F24.0 as usize);
+        let down = LPARAM(1);
+        let up = LPARAM((1u32 | 0xC000_0000) as isize);
+        if let Route::Direct { keys, .. } = &self.route {
+            unsafe {
+                if keys.OnTestKeyDown(&document.context, wparam, down).map(|b| b.as_bool()).unwrap_or(false) {
+                    let _ = keys.OnKeyDown(&document.context, wparam, down);
+                }
+                if keys.OnTestKeyUp(&document.context, wparam, up).map(|b| b.as_bool()).unwrap_or(false) {
+                    let _ = keys.OnKeyUp(&document.context, wparam, up);
+                }
+            }
+        }
     }
 
     fn type_script(&self, document: &Document, script: &str) {
@@ -315,6 +346,13 @@ impl Harness {
 }
 
 static FOCUS_WINDOW: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
+
+/// Backspaces the text service asked to send, instead of real input.
+static INJECTED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+fn inject(count: usize) {
+    INJECTED.lock().unwrap().push(count);
+}
 
 unsafe extern "system" fn window_proc(
     hwnd: windows::Win32::Foundation::HWND,
@@ -353,6 +391,7 @@ fn main() -> ExitCode {
     if registered {
         args.remove(0);
     }
+    seamtype::set_injector(inject);
     let harness = match Harness::new(registered) {
         Ok(h) => h,
         Err(e) => {
@@ -410,6 +449,31 @@ fn main() -> ExitCode {
         harness.type_script(&document, script);
         let text = document.store.text();
         report.check(script, text == *expected, format!("got {text:?}, expected {expected:?}"));
+    }
+
+    // An IMM32 app (Windows' bridge, Korean rules: one interim character composed, the rest the
+    // app's as typed): the same words come out, nothing twice.
+    let imm_scripts: &[(&str, &str)] = &[
+        ("dkssudgktpdy hello ", "안녕하세요 hello "),
+        ("dlrjs githubdp commitgkf rjdi.", "이건 github에 commit할 거야."),
+        ("hellodnjfem githubtjqj ", "hello월드 github서버 "),
+        ("gksrmf⎋ ", "gksrmf "),
+        ("gksrnr⌫", "한구"),
+        ("gksrnr⌫⌫⌫⌫", ""),
+        ("dkssudgktpdy⌫b ", "안녕하세유 "),
+        ("dkssud⏎", "안녕"),
+        ("dkssud⏎⏎", "안녕\n"),
+        ("Hello, World! ", "Hello, World! "),
+    ];
+    for (script, expected) in imm_scripts {
+        let Ok(document) = harness.document_with(true) else { continue };
+        let mut longest = 0usize;
+        for ch in script.chars() {
+            harness.press(&document, ch);
+            longest = longest.max(document.store.compositions.get().max(0) as usize);
+        }
+        let text = document.store.text();
+        report.check(&format!("imm: {script}"), text == *expected && longest <= 1, format!("got {text:?}, expected {expected:?}"));
     }
 
     // While a word is composed the field holds a composition (underlined), ended by the commit.

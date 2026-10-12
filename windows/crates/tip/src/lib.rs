@@ -12,6 +12,7 @@ mod client;
 mod diagnose;
 mod display;
 mod edit;
+mod inject;
 mod keys;
 mod langbar;
 pub mod log;
@@ -32,6 +33,7 @@ use windows::Win32::System::LibraryLoader::DisableThreadLibraryCalls;
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_core::{implement, IUnknown, Interface, Ref, BOOL, GUID, HRESULT};
 
+pub use inject::set_injector;
 pub use service::TextService;
 
 /// The COM class of the text service.
