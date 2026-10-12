@@ -1,0 +1,12 @@
+[package]
+name = "seamtype-core"
+description = "Seamtype's typing logic (a port of Sources/SeamtypeCore): composers, models, engines, InputSession"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

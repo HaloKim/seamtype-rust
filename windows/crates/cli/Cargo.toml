@@ -1,0 +1,10 @@
+[package]
+name = "seamtype-cli"
+description = "Tuning and evaluation front end of seamtype-core (the Swift seamtype-cli's commands)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+seamtype-core.workspace = true
