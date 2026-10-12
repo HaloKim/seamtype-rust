@@ -1,6 +1,7 @@
-//! Backspaces Seamtype sends itself, for an IMM32 app that already has characters of a word that
-//! must change, followed by a marker key: when the marker comes back through the text service,
-//! the app has erased them and the word goes on. Both carry `MAGIC` as their extra information.
+//! Keys Seamtype sends itself to an IMM32 app (Windows' CUAS bridge), carrying `MAGIC` as their
+//! extra information: Backspaces for characters of a word that must change, followed by a marker
+//! key (when it comes back through the text service the app has erased them and the word goes
+//! on), and keys the app has to get after the text service claimed them.
 
 use std::sync::OnceLock;
 
@@ -16,10 +17,20 @@ pub const MAGIC: usize = 0x5EA7_7E00;
 pub const MARKER: u32 = VK_F24.0 as u32;
 pub const BACKSPACE: u32 = VK_BACK.0 as u32;
 
-/// Instead of sending real input (the harness): called with the number of Backspaces.
-static INJECTOR: OnceLock<fn(usize)> = OnceLock::new();
+/// What Seamtype sends.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Injection {
+    /// Backspaces, then the marker.
+    Erase(usize),
+    /// A key the app should have had: an IMM32 app loses a key the input method claimed, even
+    /// when it then lets it go.
+    Key(u32),
+}
 
-pub fn set_injector(injector: fn(usize)) {
+/// Instead of sending real input (the harness).
+static INJECTOR: OnceLock<fn(Injection)> = OnceLock::new();
+
+pub fn set_injector(injector: fn(Injection)) {
     let _ = INJECTOR.set(injector);
 }
 
@@ -43,19 +54,26 @@ fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
     }
 }
 
-/// Sends `count` Backspaces, then the marker.
-pub fn erase_then_mark(count: usize) {
+/// Sends it; true when it went out as real input (it will come back through the text service).
+pub fn send(injection: Injection) -> bool {
     if let Some(injector) = INJECTOR.get() {
-        injector(count);
-        return;
+        injector(injection);
+        return false;
     }
-    let mut inputs = Vec::with_capacity(count * 2 + 2);
-    for _ in 0..count {
-        inputs.push(key(VK_BACK, false));
-        inputs.push(key(VK_BACK, true));
-    }
-    inputs.push(key(VK_F24, false));
-    inputs.push(key(VK_F24, true));
+    let inputs: Vec<INPUT> = match injection {
+        Injection::Erase(count) => {
+            let mut inputs = Vec::with_capacity(count * 2 + 2);
+            for _ in 0..count {
+                inputs.push(key(VK_BACK, false));
+                inputs.push(key(VK_BACK, true));
+            }
+            inputs.push(key(VK_F24, false));
+            inputs.push(key(VK_F24, true));
+            inputs
+        }
+        Injection::Key(vk) => vec![key(VIRTUAL_KEY(vk as u16), false), key(VIRTUAL_KEY(vk as u16), true)],
+    };
     let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-    crate::log!("sent {count} backspaces and the marker ({sent} of {} events)", inputs.len());
+    crate::log!("sent {injection:?} ({sent} of {} events)", inputs.len());
+    sent as usize == inputs.len()
 }

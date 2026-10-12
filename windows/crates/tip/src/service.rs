@@ -34,6 +34,7 @@ use windows_core::{implement, ComObject, Error, IUnknown, IUnknownImpl, Interfac
 use crate::client::{variant_as_i32, variant_i4, ImmWord, TsfClient};
 use crate::display::{AttributeEnum, InputAttribute};
 use crate::langbar::LangBarButton;
+use crate::inject::Injection;
 use crate::{edit, inject, keys, runtime, strings, GUID_DISPLAY_ATTRIBUTE_INPUT, GUID_PRESERVED_PAUSE};
 
 #[derive(Default)]
@@ -61,6 +62,9 @@ pub struct State {
     handling_backspace: bool,
     /// Backspaces Seamtype sent are on their way, until its marker comes back (or a moment passes).
     replacing: Option<Instant>,
+    /// Single Backspaces Seamtype sent, still to come back: if a key's extra information doesn't
+    /// say it is Seamtype's, the next Backspaces are taken as these.
+    expected_backspaces: u32,
 }
 
 /// How long Backspaces Seamtype sent may take to come back.
@@ -219,6 +223,11 @@ fn set_thread_compartment(thread_mgr: &ITfThreadMgr, client_id: u32, guid: &GUID
     }
 }
 
+/// An IMM32 app's document, bridged by Windows (TSF calls these transitory).
+fn is_transitory(context: &ITfContext) -> bool {
+    unsafe { context.GetStatus() }.map(|s| s.dwStaticFlags & TS_SS_TRANSITORY != 0).unwrap_or(false)
+}
+
 fn same_object(a: &impl Interface, b: &impl Interface) -> bool {
     match (a.cast::<IUnknown>(), b.cast::<IUnknown>()) {
         (Ok(a), Ok(b)) => a.as_raw() == b.as_raw(),
@@ -334,6 +343,7 @@ impl TextService_Impl {
                 let mut state = self.state.borrow_mut();
                 state.imm = ImmWord::default();
                 state.replacing = None;
+                state.expected_backspaces = 0;
                 return;
             }
         }
@@ -365,7 +375,19 @@ impl TextService_Impl {
         if session.passes_through(key) {
             return KeyAction::Ignore;
         }
-        let idle = !session.is_composing() && !session.has_flip_window() && !matches!(key, Key::Letter(_) | Key::Printable(_));
+        let idle = if is_transitory(context) {
+            // An IMM32 app loses a key the input method claims and lets go, so claim only what
+            // the session may use. Esc can't change a committed word there (its text can't be
+            // read back), and a symbol on its own only matters after Japanese.
+            !session.is_composing()
+                && match key {
+                    Key::Letter(_) => false,
+                    Key::Printable(_) => session.japanese_enabled,
+                    _ => true,
+                }
+        } else {
+            !session.is_composing() && !session.has_flip_window() && !matches!(key, Key::Letter(_) | Key::Printable(_))
+        };
         if idle { KeyAction::Idle(key) } else { KeyAction::Edit(key) }
     }
 
@@ -446,18 +468,38 @@ impl TextService_Impl {
                 if let Ok(mut state) = self.state.try_borrow_mut() {
                     state.handling_backspace = key == Key::Delete;
                 }
-                let handled = self
+                // (handled, the app must still get the key)
+                let (handled, resend) = self
                     .edit(context, move |state, client| {
                         TextService::refresh_session(state, Some(client));
-                        state.session.as_mut().map(|s| s.handle(key, client)).unwrap_or(false)
+                        let handled = state.session.as_mut().map(|s| s.handle(key, client)).unwrap_or(false);
+                        if handled || !client.is_imm() {
+                            return (handled, false);
+                        }
+                        // An IMM32 app lost the key when it was claimed: a character goes in
+                        // after the word, any other key is sent again.
+                        if let Key::Printable(ch) = key {
+                            if client.commit_text(&ch.to_string()).is_ok() {
+                                return (true, false);
+                            }
+                        }
+                        (true, true)
                     })
-                    .unwrap_or(false);
+                    .unwrap_or((false, false));
                 if let Ok(mut state) = self.state.try_borrow_mut() {
                     state.handling_backspace = false;
                 }
                 if self.after_edit() {
-                    // The app's Backspace erases a character it already has.
-                    return false;
+                    // A Backspace over a character the app has: the app erases it.
+                    if inject::send(Injection::Key(inject::BACKSPACE)) {
+                        if let Ok(mut state) = self.state.try_borrow_mut() {
+                            state.expected_backspaces += 1;
+                        }
+                    }
+                    return true;
+                }
+                if resend {
+                    inject::send(Injection::Key(vk));
                 }
                 handled
             }
@@ -475,31 +517,49 @@ impl TextService_Impl {
         }
         drop(state);
         if let Some(erase) = erase {
-            inject::erase_then_mark(erase);
+            inject::send(Injection::Erase(erase));
         }
         pass
     }
 
-    /// Keys Seamtype sent itself: Some(eaten) for its Backspaces (the app's) and its marker.
+    /// Keys Seamtype sent itself: Some(eaten) for its keys (the app's) and its marker. Known by
+    /// their extra information, or else (should an app's message loop lose it) by what is expected.
     fn injected(&self, context: &ITfContext, vk: u32, down: bool) -> Option<bool> {
-        if vk != inject::MARKER && vk != inject::BACKSPACE {
-            return None;
-        }
+        let magic = inject::is_ours();
         let in_flight = self
             .state
             .try_borrow()
             .map(|s| s.replacing.map(|t| t.elapsed() < REPLACING_WINDOW).unwrap_or(false))
             .unwrap_or(false);
-        if !(inject::is_ours() || in_flight) {
-            return None;
+        if vk == inject::MARKER {
+            if !(magic || in_flight) {
+                return None;
+            }
+            if down {
+                self.finish_replacement(context);
+            }
+            return Some(true);
         }
-        if vk == inject::BACKSPACE {
+        if magic {
             return Some(false);
         }
-        if down {
-            self.finish_replacement(context);
+        if vk == inject::BACKSPACE {
+            if in_flight {
+                crate::log!("a Backspace taken as Seamtype's (replacing)");
+                return Some(false);
+            }
+            // Counted on the first sight of the key (OnTestKeyDown comes first).
+            if !down {
+                if let Ok(mut state) = self.state.try_borrow_mut() {
+                    if state.expected_backspaces > 0 {
+                        state.expected_backspaces -= 1;
+                        crate::log!("a Backspace taken as Seamtype's (expected)");
+                        return Some(false);
+                    }
+                }
+            }
         }
-        Some(true)
+        None
     }
 
     /// The marker came back: the app erased what it had to, so the word goes on.
@@ -744,6 +804,9 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnTestKeyUp(&self, _context: Ref<ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         crate::guard(|| {
             let vk = wparam.0 as u32;
+            if vk != inject::MARKER && inject::is_ours() {
+                return Ok(false.into());
+            }
             let eaten = match self.state.try_borrow_mut() {
                 Ok(mut state) => {
                     if let Some(last) = state.last_down.as_mut().filter(|l| l.vk == vk) {
@@ -761,6 +824,9 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnKeyUp(&self, _context: Ref<ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         crate::guard(|| {
             let vk = wparam.0 as u32;
+            if vk != inject::MARKER && inject::is_ours() {
+                return Ok(false.into());
+            }
             let eaten = match self.state.try_borrow_mut() {
                 Ok(mut state) => {
                     if let Some(last) = state.last_down.as_mut().filter(|l| l.vk == vk) {

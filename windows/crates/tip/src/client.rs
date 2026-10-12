@@ -242,6 +242,11 @@ impl TsfClient<'_> {
 
 // IMM32 apps under Korean rules: one composed character at a time.
 impl TsfClient<'_> {
+    /// Whether the document is an IMM32 app's (through Windows' bridge).
+    pub fn is_imm(&self) -> bool {
+        self.imm.is_some()
+    }
+
     fn delivered(&self) -> String {
         self.imm.as_ref().map(|w| w.delivered.clone()).unwrap_or_default()
     }

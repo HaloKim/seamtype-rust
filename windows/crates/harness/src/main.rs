@@ -268,24 +268,33 @@ impl Harness {
         let down = LPARAM((1 | (scan << 16) | if repeat { 1 << 30 } else { 0 }) as isize);
         let up = LPARAM((1 | (scan << 16) | (0xC000_0000u32)) as isize);
         let context = &document.context;
+        // (claimed by the key test, eaten by the key itself)
         let deliver = || unsafe {
             match &self.route {
                 Route::Direct { keys, .. } if vk == VK_HANGUL => {
-                    keys.OnPreservedKey(context, &seamtype::GUID_PRESERVED_PAUSE).map(|b| b.as_bool()).unwrap_or(false)
+                    let eaten = keys.OnPreservedKey(context, &seamtype::GUID_PRESERVED_PAUSE).map(|b| b.as_bool()).unwrap_or(false);
+                    (eaten, eaten)
                 }
                 Route::Direct { keys, .. } => {
                     let test = keys.OnTestKeyDown(context, wparam, down).map(|b| b.as_bool()).unwrap_or(false);
-                    test && keys.OnKeyDown(context, wparam, down).map(|b| b.as_bool()).unwrap_or(false)
+                    (test, test && keys.OnKeyDown(context, wparam, down).map(|b| b.as_bool()).unwrap_or(false))
                 }
                 Route::Tsf { .. } => {
                     let test = self.keystrokes.TestKeyDown(wparam, down).map(|b| b.as_bool()).unwrap_or(false);
-                    test && self.keystrokes.KeyDown(wparam, down).map(|b| b.as_bool()).unwrap_or(false)
+                    (test, test && self.keystrokes.KeyDown(wparam, down).map(|b| b.as_bool()).unwrap_or(false))
                 }
             }
         };
-        let mut eaten = deliver();
+        let (mut claimed, mut eaten) = deliver();
         for _ in 1..deliveries {
-            eaten = deliver() || eaten;
+            let (c, e) = deliver();
+            claimed |= c;
+            eaten |= e;
+        }
+        // Windows' IMM32 bridge (a transitory document) loses a key the input method claimed,
+        // even when it then lets it go.
+        if claimed && document.store.transitory.get() {
+            eaten = true;
         }
         if !eaten {
             match typed {
@@ -310,13 +319,20 @@ impl Harness {
             }
         }
         self.set_shift(false);
-        // Backspaces the text service sent (to an IMM32 app): the app erases, then the marker.
-        let injected: Vec<usize> = std::mem::take(&mut *INJECTED.lock().unwrap());
-        for count in injected {
-            for _ in 0..count {
-                document.store.app_backspace();
+        // Keys the text service sent: the app gets them (Backspaces, then the marker comes back).
+        let injected: Vec<seamtype::Injection> = std::mem::take(&mut *INJECTED.lock().unwrap());
+        for injection in injected {
+            match injection {
+                seamtype::Injection::Erase(count) => {
+                    for _ in 0..count {
+                        document.store.app_backspace();
+                    }
+                    self.marker(document);
+                }
+                seamtype::Injection::Key(k) if k == VK_BACK.0 as u32 => document.store.app_backspace(),
+                seamtype::Injection::Key(k) if k == VK_RETURN.0 as u32 => document.store.app_insert("\n"),
+                seamtype::Injection::Key(_) => {}
             }
-            self.marker(document);
         }
         eaten
     }
@@ -347,11 +363,11 @@ impl Harness {
 
 static FOCUS_WINDOW: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
 
-/// Backspaces the text service asked to send, instead of real input.
-static INJECTED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+/// Keys the text service asked to send, instead of real input.
+static INJECTED: std::sync::Mutex<Vec<seamtype::Injection>> = std::sync::Mutex::new(Vec::new());
 
-fn inject(count: usize) {
-    INJECTED.lock().unwrap().push(count);
+fn inject(injection: seamtype::Injection) {
+    INJECTED.lock().unwrap().push(injection);
 }
 
 unsafe extern "system" fn window_proc(
@@ -464,6 +480,11 @@ fn main() -> ExitCode {
         ("dkssud⏎", "안녕"),
         ("dkssud⏎⏎", "안녕\n"),
         ("Hello, World! ", "Hello, World! "),
+        ("dkssud  gksrmf", "안녕  한글"),
+        ("dkssud ⌫⌫gksrmf ", "안한글 "),
+        ("hello⌫⌫p ", "help "),
+        ("dhsmf 3tl", "오늘 3시"),
+        ("dho?", "왜?"),
     ];
     for (script, expected) in imm_scripts {
         let Ok(document) = harness.document_with(true) else { continue };
