@@ -137,7 +137,7 @@ unsafe extern "system" fn posted(code: i32, wparam: WPARAM, lparam: LPARAM) -> L
 
 /// Traces this thread's IME messages into the log.
 pub fn install_hooks() {
-    if !crate::log::enabled() {
+    if !*crate::log::MESSAGES {
         return;
     }
     HOOKS.with(|hooks| {
