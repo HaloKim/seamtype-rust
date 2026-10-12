@@ -61,6 +61,7 @@ name = "seamtype-tip"
 version = "0.1.5"
 dependencies = [
  "seamtype-core",
+ "serde_json",
  "windows",
  "windows-core",
 ]

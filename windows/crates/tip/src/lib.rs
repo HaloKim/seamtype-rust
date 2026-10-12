@@ -9,6 +9,7 @@
 #![allow(non_snake_case)]
 
 mod client;
+mod diagnose;
 mod display;
 mod edit;
 mod keys;

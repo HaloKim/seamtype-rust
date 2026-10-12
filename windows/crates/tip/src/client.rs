@@ -8,10 +8,12 @@
 use std::mem::ManuallyDrop;
 
 use seamtype_core::{TextClient, TextRange};
+
+use crate::runtime::{Caret, ImeOptions};
 use windows::Win32::System::Variant::{VARENUM, VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfInsertAtSelection, ITfRange, ITfRangeACP,
-    GUID_PROP_ATTRIBUTE, TF_AE_NONE, TF_ANCHOR_END, TF_DEFAULT_SELECTION, TF_IAS_QUERYONLY, TF_SELECTION,
+    GUID_PROP_ATTRIBUTE, TF_AE_NONE, TF_ANCHOR_END, TF_ANCHOR_START, TF_DEFAULT_SELECTION, TF_IAS_QUERYONLY, TF_SELECTION,
     TF_SELECTIONSTYLE,
 };
 use windows_core::{Interface, Result};
@@ -23,6 +25,7 @@ pub struct TsfClient<'a> {
     pub sink: &'a ITfCompositionSink,
     /// The display attribute atom for marked text (0: none registered).
     pub atom: u32,
+    pub ime: ImeOptions,
 }
 
 pub fn variant_i4(value: i32) -> VARIANT {
@@ -55,18 +58,48 @@ impl TsfClient<'_> {
         unsafe { insert.InsertTextAtSelection(self.ec, TF_IAS_QUERYONLY, &[]) }
     }
 
+    fn select(&self, range: ITfRange, interim: bool) -> Result<()> {
+        unsafe {
+            let selection = TF_SELECTION {
+                range: ManuallyDrop::new(Some(range)),
+                style: TF_SELECTIONSTYLE { ase: TF_AE_NONE, fInterimChar: interim.into() },
+            };
+            let result = self.context.SetSelection(self.ec, std::slice::from_ref(&selection));
+            drop(ManuallyDrop::into_inner(selection.range));
+            result
+        }
+    }
+
     /// Puts the caret (an empty selection) at the end of `range`.
     fn caret_after(&self, range: &ITfRange) -> Result<()> {
         unsafe {
             let caret = range.Clone()?;
             caret.Collapse(self.ec, TF_ANCHOR_END)?;
-            let selection = TF_SELECTION {
-                range: ManuallyDrop::new(Some(caret)),
-                style: TF_SELECTIONSTYLE { ase: TF_AE_NONE, fInterimChar: false.into() },
-            };
-            let result = self.context.SetSelection(self.ec, std::slice::from_ref(&selection));
-            drop(ManuallyDrop::into_inner(selection.range));
-            result
+            self.select(caret, false)
+        }
+    }
+
+    /// The caret while composing, as `imeCaret` says.
+    fn place_caret(&self, range: &ITfRange) -> Result<()> {
+        match self.ime.caret {
+            Caret::End => self.caret_after(range),
+            Caret::Keep => Ok(()),
+            Caret::Start => unsafe {
+                let caret = range.Clone()?;
+                caret.Collapse(self.ec, TF_ANCHOR_START)?;
+                self.select(caret, false)
+            },
+            Caret::Interim => unsafe {
+                let last = range.Clone()?;
+                let acp: ITfRangeACP = last.cast()?;
+                let (mut start, mut length) = (0i32, 0i32);
+                acp.GetExtent(&mut start, &mut length)?;
+                if length < 1 {
+                    return self.caret_after(range);
+                }
+                acp.SetExtent(start + length - 1, 1)?;
+                self.select(last, true)
+            },
         }
     }
 
@@ -132,8 +165,10 @@ impl TsfClient<'_> {
             Some(composition) => unsafe { composition.GetRange()? },
             None => range,
         };
-        let _ = self.set_attribute(&range);
-        self.caret_after(&range)
+        if self.ime.attribute {
+            let _ = self.set_attribute(&range);
+        }
+        self.place_caret(&range)
     }
 
     fn try_insert_text(&mut self, text: &str, replacing: Option<TextRange>) -> Result<()> {

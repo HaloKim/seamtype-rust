@@ -23,6 +23,7 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPRO
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::TextServices::{
     CLSID_TF_InputProcessorProfiles, CLSID_TF_ThreadMgr, GUID_TFCAT_TIP_KEYBOARD, ITextStoreACP, ITfClientId, ITfContext,
+    ITfContextOwnerCompositionServices,
     ITfDocumentMgr, ITfInputProcessorProfileMgr, ITfKeyEventSink, ITfKeystrokeMgr, ITfThreadMgr, ITfThreadMgrEventSink,
     ITfThreadMgrEx, TF_INPUTPROCESSORPROFILE, TF_IPPMF_DONTCARECURRENTINPUTLANGUAGE, TF_IPPMF_FORPROCESS,
     TF_PROFILETYPE_INPUTPROCESSOR, TF_TMAE_NOACTIVATETIP,
@@ -434,6 +435,24 @@ fn main() -> ExitCode {
             "key presses delivered twice",
             document.store.text() == "안녕하세요 ",
             format!("got {:?}", document.store.text()),
+        );
+    }
+
+    // An app that ends every composition as soon as it shows (Webex, a Qt app, did): what it
+    // showed stays, once; nothing is typed twice.
+    if let Ok(document) = harness.document() {
+        let services: Option<ITfContextOwnerCompositionServices> = document.context.cast().ok();
+        for ch in "dkssud".chars() {
+            harness.press(&document, ch);
+            if let Some(services) = &services {
+                let _ = unsafe { services.TerminateComposition(None) };
+            }
+        }
+        let text = document.store.text();
+        report.check(
+            "app ends each composition",
+            text.chars().count() == 6 && document.store.compositions.get() == 0,
+            format!("got {text:?} ({} compositions)", document.store.compositions.get()),
         );
     }
 

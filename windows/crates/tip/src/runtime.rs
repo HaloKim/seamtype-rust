@@ -14,8 +14,56 @@ use std::time::{Duration, Instant, SystemTime};
 
 use seamtype_core::{AppPolicies, AppPolicy, InputSession, KanaConverter, LearningEngine, Settings, SharedConverter};
 
+/// Where the caret goes while a word is composed (`imeCaret` in settings.json, for apps that
+/// care; normally the end of the word).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Caret {
+    #[default]
+    End,
+    Start,
+    /// Leave the selection as TSF puts it.
+    Keep,
+    /// The last character selected as an interim character, as Korean input methods show the
+    /// syllable being typed.
+    Interim,
+}
+
+/// How the composition is shown, read from settings.json's Windows-only keys.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ImeOptions {
+    pub caret: Caret,
+    /// Underline the composition through a display attribute (`imeAttribute`).
+    pub attribute: bool,
+}
+
+impl Default for ImeOptions {
+    fn default() -> Self {
+        ImeOptions { caret: Caret::End, attribute: true }
+    }
+}
+
+fn load_ime_options() -> ImeOptions {
+    let value: Option<serde_json::Value> = Settings::store_path()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|data| serde_json::from_slice(&data).ok());
+    let mut options = ImeOptions::default();
+    if let Some(value) = value {
+        options.caret = match value.get("imeCaret").and_then(|v| v.as_str()) {
+            Some("start") => Caret::Start,
+            Some("keep") => Caret::Keep,
+            Some("interim") => Caret::Interim,
+            _ => Caret::End,
+        };
+        if let Some(on) = value.get("imeAttribute").and_then(|v| v.as_bool()) {
+            options.attribute = on;
+        }
+    }
+    options
+}
+
 pub struct Runtime {
     pub settings: Settings,
+    pub ime: ImeOptions,
     pub engine: Arc<LearningEngine>,
     pub converter: Option<SharedConverter>,
     pub generation: u64,
@@ -39,6 +87,7 @@ impl Runtime {
     fn load() -> Runtime {
         let settings = Settings::load_default();
         Runtime {
+            ime: load_ime_options(),
             engine: Self::make_engine(&settings),
             converter: Self::make_converter(&settings),
             settings,
@@ -85,6 +134,11 @@ impl Runtime {
         if settings_stamp != self.settings_stamp {
             self.settings_stamp = settings_stamp;
             self.apply(Settings::load_default());
+            let ime = load_ime_options();
+            if ime != self.ime {
+                crate::log!("composition style: {ime:?}");
+                self.ime = ime;
+            }
         }
         if apps_stamp != self.apps_stamp {
             self.apps_stamp = apps_stamp;

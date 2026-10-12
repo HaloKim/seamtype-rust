@@ -211,13 +211,14 @@ impl TextService_Impl {
         let sink: ITfCompositionSink = self.to_interface();
         let out: Rc<RefCell<Option<R>>> = Rc::new(RefCell::new(None));
         let result = out.clone();
+        let ime = runtime::get().ime;
         let ran = edit::sync_write(context, self.client_id(), move |ec| {
             let mut guard = this.state.try_borrow_mut().map_err(|_| Error::from(E_UNEXPECTED))?;
             let state = &mut *guard;
             let mut composition = state.composition.take();
             let atom = state.atom;
             let value = {
-                let mut client = TsfClient { ec, context: &ctx, composition: &mut composition, sink: &sink, atom };
+                let mut client = TsfClient { ec, context: &ctx, composition: &mut composition, sink: &sink, atom, ime };
                 f(state, &mut client)
             };
             state.composition = composition;
@@ -482,11 +483,13 @@ impl TextService_Impl {
             let mut state = self.state.borrow_mut();
             TextService::refresh_session(&mut state, None);
         }
+        crate::diagnose::install_hooks();
         crate::log!("activated");
         Ok(())
     }
 
     fn deactivate(&self) -> Result<()> {
+        crate::diagnose::remove_hooks();
         self.finish_composition();
         let mut state = self.state.borrow_mut();
         if let Some(thread_mgr) = state.thread_mgr.take() {
@@ -677,10 +680,14 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
 }
 
 impl ITfCompositionSink_Impl for TextService_Impl {
-    /// The app ended the composition (a click elsewhere, its own commit): the word goes in as
-    /// decided, and the next word starts a new sentence.
+    /// The app ended the composition (a click elsewhere, its own commit): the text stays as the
+    /// field shows it, and the next word starts a new sentence. Nothing is inserted again: the
+    /// app (or Windows' IMM32 bridge for it) has already committed what was shown.
     fn OnCompositionTerminated(&self, ec: u32, composition: Ref<ITfComposition>) -> Result<()> {
         crate::guard(|| {
+            if crate::log::enabled() {
+                crate::log!("composition ended by the app, from: {}", crate::diagnose::stack());
+            }
             let Ok(mut guard) = self.state.try_borrow_mut() else { return Ok(()) };
             let state = &mut *guard;
             let ours = match (state.composition.as_ref(), composition.as_ref()) {
@@ -690,19 +697,20 @@ impl ITfCompositionSink_Impl for TextService_Impl {
             if !ours {
                 return Ok(());
             }
-            let context = unsafe { state.composition.as_ref().and_then(|c| c.GetRange().ok()).and_then(|r| r.GetContext().ok()) };
-            let mut terminated = state.composition.take();
-            if let Some(context) = context {
-                let sink: ITfCompositionSink = self.to_interface();
-                let mut client = TsfClient { ec, context: &context, composition: &mut terminated, sink: &sink, atom: state.atom };
-                if let Some(session) = state.session.as_mut() {
-                    session.commit_for_new_context(Some(&mut client));
+            // The underline goes with the composition.
+            unsafe {
+                if let Some(range) = state.composition.as_ref().and_then(|c| c.GetRange().ok()) {
+                    if let Ok(context) = range.GetContext() {
+                        if let Ok(property) = context.GetProperty(&windows::Win32::UI::TextServices::GUID_PROP_ATTRIBUTE) {
+                            let _ = property.Clear(ec, &range);
+                        }
+                    }
                 }
-            } else if let Some(session) = state.session.as_mut() {
-                session.abandon();
             }
             state.composition = None;
-            crate::log!("composition terminated by the app");
+            if let Some(session) = state.session.as_mut() {
+                session.abandon();
+            }
             Ok(())
         })
     }
