@@ -59,6 +59,12 @@ pkg와 다른 방법을 함께 쓰면 같은 입력기가 두 개 생깁니다. 
 메모리는 ~50 MB(일본어를 켜면 일본어 사전 ~35 MB 추가), 앱 크기는 ~47 MB이고, 따로 실행되는 프로그램은
 없습니다. 입력한 키는 입력기 밖으로 나가지 않습니다.
 
+### Windows
+
+Windows용은 [`windows/`](windows/README.md)에 있습니다. 같은 판정 엔진을 Rust로 옮긴 Windows 입력기(TSF)로,
+`powershell -ExecutionPolicy Bypass -File windows\scripts\install.ps1`이 빌드하고 설치합니다. 일시정지는
+한/영 키, 입력 메뉴는 작업 표시줄의 Seamtype 아이콘입니다. 한자 변환은 아직 없습니다(일본어는 가나까지).
+
 ### 제거
 
 설정 창의 **정보 → Seamtype 제거 → 제거…**를 누르세요. 두 Input Methods 폴더의 Seamtype을 모두 지우고

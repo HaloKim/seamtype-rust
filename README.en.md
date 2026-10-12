@@ -62,6 +62,13 @@ Using the pkg together with another way gives you two copies of the input method
 Seamtype takes ~50 MB of memory (plus the ~35 MB Japanese dictionary when Japanese is on) and
 ~47 MB on disk, with nothing else running. Keystrokes never leave the input method.
 
+### Windows
+
+The Windows version is in [`windows/`](windows/README.en.md): a Windows input method (TSF) over a Rust
+port of the same engine. `powershell -ExecutionPolicy Bypass -File windows\scripts\install.ps1` builds
+and installs it. The Han/Eng key pauses it, and its menu is on Seamtype's taskbar icon. No kanji yet
+(Japanese stops at kana).
+
 ### Uninstall
 
 In the settings window, click **About → Uninstall Seamtype → Uninstall…**. It removes Seamtype

@@ -1,0 +1,23 @@
+[package]
+name = "seamtype-harness"
+description = "Types through the real text service and Windows' real text framework into a text store of its own: end-to-end checks without registering the input method or touching the keyboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+seamtype-tip = { path = "../tip" }
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_TextServices",
+]
+
+[dependencies.windows-core]
+workspace = true

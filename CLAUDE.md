@@ -131,3 +131,28 @@ runtime.
   self-test under Rosetta too for a universal build.
 - **Stale registrations:** extra copies of the app registered with LaunchServices (`build/`,
   the old `AutoIME.app`) can make macOS launch the wrong one. `build-app.sh` unregisters its copy.
+
+## Windows (`windows/`)
+
+A Rust workspace: `crates/core` (seamtype-core) ports `Sources/SeamtypeCore` module for module and
+reads the same `Sources/SeamtypeCore/Data` files (baked into tables by `build.rs`); `crates/tip` is
+the TSF text service (`seamtype.dll`, the counterpart of `Sources/Seamtype`); `crates/cli` mirrors
+seamtype-cli; `crates/harness` types through Windows' real TSF into a text store of its own.
+
+```sh
+cd windows && cargo test                     # ported Swift tests + key mapping
+cargo run -p seamtype-harness                # end to end through TSF, nothing registered
+python3 ../tools/eval_context.py target/release/seamtype-cli.exe ko_50k.txt en_50k.txt 10000   # 48 / 488
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1   # build, copy to Program Files, regsvr32 (UAC), add the keyboard
+```
+
+- **Keep the port in step.** A behavior change in `SeamtypeCore` goes into `crates/core` the same
+  way, with its test ported; `eval_context.py` must still match between the two CLIs.
+- The text service runs inside every app: never panic across COM (`guard`), never hold the runtime
+  lock or a `RefCell` borrow while calling into TSF (it calls back), and never log typed text.
+- TSF routes keys and focus events only to a text service it activated from the registry, so the
+  harness calls the key and focus sinks itself; edit sessions and compositions are TSF's own.
+- Settings changes reach other processes through the files' modification times (no distributed
+  notifications on Windows); `LearningEngine` reads lexicon.json back before writing.
+- Windows has no `/usr/share/dict/words`: `crates/core/data/spelling_trigrams.txt` holds its counts
+  (`windows/tools/build_spelling_trigrams.py`).
