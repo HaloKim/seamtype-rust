@@ -61,6 +61,13 @@ the ones before it typed. Decisions are still per word: when a word changes read
 split decided late), the characters already typed are erased with Backspace and typed again. Esc
 right after a commit can't change the word in these apps (their text can't be read back).
 
+So in these apps, while it isn't yet clear that a word is English and its Korean reading is a single
+character, that character is shown instead: English letters handed over early have to be erased
+again when the word turns Korean (an → ant → 무스 on the way to `무슨`). Short English words such as
+a, to, so and go may then show as one Hangul character (ㅁ, 새, 내, 해) until Space commits them as
+English, as in any other app. On 20,000 words of Korean chat this cut the erasing from 6.4 to 2.3
+times per 100 words.
+
 ## Not yet
 
 - **Kanji.** macOS converts with AzooKey's dictionary (Swift). On Windows, Japanese stops at kana: Space

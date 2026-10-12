@@ -775,3 +775,68 @@ fn english_shortcuts_are_left_to_the_engine() {
     type_keys(&mut session, &mut field, "kyouha go");
     assert_ne!(session.last_trace().map(|t| t.decision.explanation.as_str()), Some("text replacement shortcut"));
 }
+
+// MARK: - Apps that deliver early (Windows' IMM32 bridge)
+
+/// What the field shows after each of `keys`, past what it held before.
+fn shown_after_each(session: &mut InputSession, field: &mut FakeTextField, keys: &str) -> Vec<String> {
+    let start = field.text().chars().count();
+    keys.chars()
+        .map(|ch| {
+            type_keys(session, field, &ch.to_string());
+            field.text().chars().skip(start).collect()
+        })
+        .collect()
+}
+
+/// An app that already has all but the last character (Webex through IMM32) isn't shown an unsure
+/// English reading while one Korean character would do: an, ant would have to be erased again with
+/// Backspaces once 무슨 turns Korean. A field that composes the whole word still shows them.
+#[test]
+fn early_delivery_app_waits_with_unsure_english() {
+    let mut session = mixed_session(false);
+    let mut field = FakeTextField::early_delivery();
+    type_keys(&mut session, &mut field, "dkssud ");
+    assert_eq!(shown_after_each(&mut session, &mut field, "antms "), ["ㅁ", "무", "뭇", "무스", "무슨", "무슨 "]);
+
+    let mut session = mixed_session(false);
+    let mut field = FakeTextField::new();
+    type_keys(&mut session, &mut field, "dkssud ");
+    assert_eq!(shown_after_each(&mut session, &mut field, "antms "), ["a", "an", "ant", "무스", "무슨", "무슨 "]);
+}
+
+/// Only what is shown changes: the same keys commit the same text.
+#[test]
+fn early_delivery_app_commits_the_same() {
+    let script = "dkssud antms sork so to the and a githubdp gksrmf hello dlrjs go ";
+    let mut field = FakeTextField::new();
+    type_keys(&mut mixed_session(false), &mut field, script);
+    let mut early = FakeTextField::early_delivery();
+    type_keys(&mut mixed_session(false), &mut early, script);
+    assert_eq!(early.text(), field.text());
+}
+
+/// Common English words of three letters or more stay English on screen (the, not 소).
+#[test]
+fn early_delivery_app_shows_common_english_words() {
+    let mut session = mixed_session(false);
+    let mut field = FakeTextField::early_delivery();
+    type_keys(&mut session, &mut field, "dkssud the");
+    assert_eq!(field.text(), "안녕 the");
+}
+
+/// Esc and Delete go by what is on screen: Esc on 무 (an) switches to an, Delete keeps it Korean.
+#[test]
+fn early_delivery_app_esc_and_delete_go_by_the_screen() {
+    let mut session = mixed_session(false);
+    let mut field = FakeTextField::early_delivery();
+    type_keys(&mut session, &mut field, "dkssud an");
+    assert_eq!(field.text(), "안녕 무");
+    type_keys(&mut session, &mut field, "⎋ ");
+    assert_eq!(field.text(), "안녕 an ");
+
+    let mut session = mixed_session(false);
+    let mut field = FakeTextField::early_delivery();
+    type_keys(&mut session, &mut field, "dkssud an⌫");
+    assert_eq!(field.text(), "안녕 ㅁ");
+}

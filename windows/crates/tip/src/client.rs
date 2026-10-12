@@ -382,6 +382,10 @@ impl TsfClient<'_> {
 }
 
 impl TextClient for TsfClient<'_> {
+    fn delivers_all_but_last(&self) -> bool {
+        self.is_imm()
+    }
+
     fn set_marked_text(&mut self, text: &str) {
         if let Err(e) = self.try_set_marked_text(text) {
             crate::log!("set marked text failed: {e}");

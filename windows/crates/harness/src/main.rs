@@ -324,6 +324,7 @@ impl Harness {
         for injection in injected {
             match injection {
                 seamtype::Injection::Erase(count) => {
+                    ERASES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     for _ in 0..count {
                         document.store.app_backspace();
                     }
@@ -365,6 +366,8 @@ static FOCUS_WINDOW: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
 
 /// Keys the text service asked to send, instead of real input.
 static INJECTED: std::sync::Mutex<Vec<seamtype::Injection>> = std::sync::Mutex::new(Vec::new());
+/// How many times characters the app already had were erased.
+static ERASES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn inject(injection: seamtype::Injection) {
     INJECTED.lock().unwrap().push(injection);
@@ -495,6 +498,16 @@ fn main() -> ExitCode {
         }
         let text = document.store.text();
         report.check(&format!("imm: {script}"), text == *expected && longest <= 1, format!("got {text:?}, expected {expected:?}"));
+    }
+
+    // The start of a Korean word that could be English (an, ant → 무슨) isn't handed to the app
+    // while the engine is unsure, so nothing has to be erased again.
+    if let Ok(document) = harness.document_with(true) {
+        let before = ERASES.load(std::sync::atomic::Ordering::SeqCst);
+        harness.type_script(&document, "dkssud antms ");
+        let erased = ERASES.load(std::sync::atomic::Ordering::SeqCst) - before;
+        let text = document.store.text();
+        report.check("imm: unsure english start waits", text == "안녕 무슨 " && erased == 0, format!("got {text:?}, {erased} erasures"));
     }
 
     // While a word is composed the field holds a composition (underlined), ended by the commit.

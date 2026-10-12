@@ -56,17 +56,24 @@ pub struct FakeTextField {
     pub cursor: usize,
     /// Simulates apps that don't support reading back their text.
     pub readable: bool,
+    /// Simulates an app that already has all but the last character of the marked text
+    /// (Windows' IMM32 bridge with a Korean input method).
+    pub early_delivery: bool,
 }
 
 impl Default for FakeTextField {
     fn default() -> Self {
-        FakeTextField { text: Vec::new(), marked: TextRange::NONE, cursor: 0, readable: true }
+        FakeTextField { text: Vec::new(), marked: TextRange::NONE, cursor: 0, readable: true, early_delivery: false }
     }
 }
 
 impl FakeTextField {
     pub fn new() -> FakeTextField {
         FakeTextField::default()
+    }
+
+    pub fn early_delivery() -> FakeTextField {
+        FakeTextField { early_delivery: true, ..FakeTextField::default() }
     }
 
     pub fn text(&self) -> String {
@@ -119,6 +126,10 @@ impl TextClient for FakeTextField {
             return None;
         }
         Some(String::from_utf16(&self.text[range.location..end]).unwrap())
+    }
+
+    fn delivers_all_but_last(&self) -> bool {
+        self.early_delivery
     }
 }
 
