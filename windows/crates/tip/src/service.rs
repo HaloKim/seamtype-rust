@@ -26,8 +26,8 @@ use windows::Win32::UI::TextServices::{
     ITfDocumentMgr, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItemButton, ITfLangBarItemMgr, ITfSource,
     ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl, ITfTextInputProcessor_Impl, ITfThreadMgr,
     ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, GUID_COMPARTMENT_EMPTYCONTEXT,
-    GUID_COMPARTMENT_KEYBOARD_DISABLED, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, TF_INVALID_COOKIE, TF_PRESERVEDKEY,
-    TS_SS_TRANSITORY,
+    GUID_COMPARTMENT_KEYBOARD_DISABLED, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+    TF_CONVERSIONMODE_NATIVE, TF_INVALID_COOKIE, TF_PRESERVEDKEY, TS_SS_TRANSITORY,
 };
 use windows_core::{implement, ComObject, Error, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, GUID};
 
@@ -187,6 +187,29 @@ fn keyboard_disabled(context: &ITfContext) -> bool {
     compartment_on(&manager, &GUID_COMPARTMENT_KEYBOARD_DISABLED) || compartment_on(&manager, &GUID_COMPARTMENT_EMPTYCONTEXT)
 }
 
+/// A compartment of the thread manager itself (where the keyboard's open state and input mode
+/// live; Windows' IMM32 bridge reads them for apps that aren't TSF-aware).
+fn thread_compartment_value(thread_mgr: &ITfThreadMgr, guid: &GUID) -> Option<i32> {
+    let manager: ITfCompartmentMgr = thread_mgr.cast().ok()?;
+    unsafe {
+        let compartment = manager.GetCompartment(guid).ok()?;
+        let mut value = compartment.GetValue().ok()?;
+        let v = variant_as_i32(&value);
+        let _ = VariantClear(&mut value);
+        v
+    }
+}
+
+fn set_thread_compartment(thread_mgr: &ITfThreadMgr, client_id: u32, guid: &GUID, value: i32) -> bool {
+    let Ok(manager) = thread_mgr.cast::<ITfCompartmentMgr>() else { return false };
+    unsafe {
+        match manager.GetCompartment(guid) {
+            Ok(compartment) => compartment.SetValue(client_id, &variant_i4(value)).is_ok(),
+            Err(_) => false,
+        }
+    }
+}
+
 fn same_object(a: &impl Interface, b: &impl Interface) -> bool {
     match (a.cast::<IUnknown>(), b.cast::<IUnknown>()) {
         (Ok(a), Ok(b)) => a.as_raw() == b.as_raw(),
@@ -201,6 +224,32 @@ fn pause_key() -> TF_PRESERVEDKEY {
 impl TextService_Impl {
     fn client_id(&self) -> u32 {
         self.state.try_borrow().map(|s| s.client_id).unwrap_or(0)
+    }
+
+    /// Opens the keyboard in Hangul (native) mode, as the system's Korean input method keeps it.
+    /// Windows' IMM32 bridge reads these for apps that aren't TSF-aware (Qt apps such as Webex,
+    /// Win32 edit controls): closed, or in alphanumeric mode, it commits every composition the
+    /// moment it starts.
+    fn open_keyboard(&self, why: &str) {
+        let (thread_mgr, client_id) = match self.state.try_borrow() {
+            Ok(state) => match state.thread_mgr.clone() {
+                Some(t) => (t, state.client_id),
+                None => return,
+            },
+            Err(_) => return,
+        };
+        let open = thread_compartment_value(&thread_mgr, &GUID_COMPARTMENT_KEYBOARD_OPENCLOSE);
+        let mode = thread_compartment_value(&thread_mgr, &GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION);
+        let native = TF_CONVERSIONMODE_NATIVE as i32;
+        if open != Some(1) {
+            let ok = set_thread_compartment(&thread_mgr, client_id, &GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, 1);
+            crate::log!("keyboard was {open:?}, opened ({why}): {ok}");
+        }
+        if mode.map(|m| m & native == 0).unwrap_or(true) {
+            let value = mode.unwrap_or(0) | native;
+            let ok = set_thread_compartment(&thread_mgr, client_id, &GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, value);
+            crate::log!("input mode was {mode:?}, set native ({why}): {ok}");
+        }
     }
 
     /// Runs `f` with the state and a client over `context` in a synchronous edit session.
@@ -355,6 +404,9 @@ impl TextService_Impl {
             }
             KeyAction::Edit(_) if test => true,
             KeyAction::Edit(key) => {
+                if matches!(key, Key::Letter(_)) && !self.state.try_borrow().map(|s| s.composition.is_some()).unwrap_or(true) {
+                    self.open_keyboard("typing");
+                }
                 // A composition left in another field (focus moved without telling) goes in first.
                 if let Some(other) = self.composition_context() {
                     if !same_object(&other, context) {
@@ -462,12 +514,7 @@ impl TextService_Impl {
                 }
             }
 
-            // Input methods are "open" for this thread (some apps look before sending keys).
-            if let Ok(global) = thread_mgr.GetGlobalCompartment() {
-                if let Ok(open) = global.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE) {
-                    let _ = open.SetValue(client_id, &variant_i4(1));
-                }
-            }
+
         }
 
         if let Ok(items) = thread_mgr.cast::<ITfLangBarItemMgr>() {
@@ -483,6 +530,7 @@ impl TextService_Impl {
             let mut state = self.state.borrow_mut();
             TextService::refresh_session(&mut state, None);
         }
+        self.open_keyboard("activated");
         crate::diagnose::install_hooks();
         crate::log!("activated");
         Ok(())
@@ -652,6 +700,7 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
         crate::guard(|| {
             crate::log!("focus changed");
             self.finish_composition();
+            self.open_keyboard("focus");
             runtime::get().refresh(true);
             if let Ok(mut state) = self.state.try_borrow_mut() {
                 TextService::refresh_session(&mut state, None);
