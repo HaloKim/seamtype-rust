@@ -11,6 +11,8 @@
 
 <p align="center"><a href="https://nyttastudio.com/seamtype/">Website (Korean)</a> · <a href="README.md">한국어</a> · English</p>
 
+> **seamtype-rust**: a fork of [aimdevlee/seamtype](https://github.com/aimdevlee/seamtype) that adds a **Windows input method** over a Rust port of the same engine → [`windows/`](windows/README.en.md)
+
 Type everything on the English (QWERTY) layout and stop pressing the language-switch key.
 Seamtype is a macOS input method that decides **per word** whether you meant English,
 Korean (2-set / 두벌식) or — if you turn it on — Japanese (romaji), and commits the right one.

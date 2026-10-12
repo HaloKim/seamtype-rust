@@ -248,14 +248,20 @@ impl Harness {
     /// Presses one key as an app's message loop would hand it to TSF; returns whether the text
     /// service ate it.
     fn press(&self, document: &Document, ch: char) -> bool {
+        self.press_with(document, ch, 1, false)
+    }
+
+    /// `deliveries` times the same key-down (as some apps hand it over), then its key-up;
+    /// `repeat` flags the key-down as auto-repeat.
+    fn press_with(&self, document: &Document, ch: char, deliveries: usize, repeat: bool) -> bool {
         let (vk, shift, typed) = press_for(ch);
         self.set_shift(shift);
         let scan = unsafe { MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) };
         let wparam = WPARAM(vk.0 as usize);
-        let down = LPARAM((1 | (scan << 16)) as isize);
+        let down = LPARAM((1 | (scan << 16) | if repeat { 1 << 30 } else { 0 }) as isize);
         let up = LPARAM((1 | (scan << 16) | (0xC000_0000u32)) as isize);
         let context = &document.context;
-        let eaten = unsafe {
+        let deliver = || unsafe {
             match &self.route {
                 Route::Direct { keys, .. } if vk == VK_HANGUL => {
                     keys.OnPreservedKey(context, &seamtype::GUID_PRESERVED_PAUSE).map(|b| b.as_bool()).unwrap_or(false)
@@ -270,6 +276,10 @@ impl Harness {
                 }
             }
         };
+        let mut eaten = deliver();
+        for _ in 1..deliveries {
+            eaten = deliver() || eaten;
+        }
         if !eaten {
             match typed {
                 Typed::Text(s) => document.store.app_insert(&s),
@@ -413,6 +423,27 @@ fn main() -> ExitCode {
             composing == 1 && shown == "안녕" && after == 0 && document.store.text() == "안녕 ",
             format!("compositions {composing} → {after}, text {shown:?} → {:?}", document.store.text()),
         );
+    }
+
+    // An app that hands every key press over twice (Qt apps through IMM32): each press counts once.
+    if let Ok(document) = harness.document() {
+        for ch in "dkssudgktpdy ".chars() {
+            harness.press_with(&document, ch, 2, false);
+        }
+        report.check(
+            "key presses delivered twice",
+            document.store.text() == "안녕하세요 ",
+            format!("got {:?}", document.store.text()),
+        );
+    }
+
+    // Auto-repeat is a new press every time, even without a key-up in between.
+    if let Ok(document) = harness.document() {
+        harness.press_with(&document, 'z', 1, false);
+        harness.press_with(&document, 'z', 1, true);
+        harness.press_with(&document, 'z', 1, true);
+        harness.press(&document, ' ');
+        report.check("auto-repeat", document.store.text() == "ㅋㅋㅋ ", format!("got {:?}", document.store.text()));
     }
 
     // A click elsewhere closes the flip window: Esc goes to the app.

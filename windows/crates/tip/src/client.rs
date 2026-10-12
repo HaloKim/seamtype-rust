@@ -12,7 +12,7 @@ use windows::Win32::System::Variant::{VARENUM, VARIANT, VARIANT_0, VARIANT_0_0, 
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfInsertAtSelection, ITfRange, ITfRangeACP,
     GUID_PROP_ATTRIBUTE, TF_AE_NONE, TF_ANCHOR_END, TF_DEFAULT_SELECTION, TF_IAS_QUERYONLY, TF_SELECTION,
-    TF_SELECTIONSTYLE, TF_ST_CORRECTION,
+    TF_SELECTIONSTYLE,
 };
 use windows_core::{Interface, Result};
 
@@ -121,12 +121,13 @@ impl TsfClient<'_> {
                 let at = self.insert_point()?;
                 let composition_context: ITfContextComposition = self.context.cast()?;
                 let composition = unsafe { composition_context.StartComposition(self.ec, &at, self.sink)? };
+                crate::log!("composition started");
                 let range = unsafe { composition.GetRange()? };
                 *self.composition = Some(composition);
                 range
             }
         };
-        unsafe { range.SetText(self.ec, TF_ST_CORRECTION, &utf16(text))? };
+        unsafe { range.SetText(self.ec, 0, &utf16(text))? };
         let range = match self.composition.as_ref() {
             Some(composition) => unsafe { composition.GetRange()? },
             None => range,
@@ -143,17 +144,13 @@ impl TsfClient<'_> {
         }
         if let Some(composition) = self.composition.take() {
             unsafe {
-                crate::log!("commit: composition range");
                 let range = composition.GetRange()?;
-                crate::log!("commit: set text");
                 range.SetText(self.ec, 0, &utf16(text))?;
-                crate::log!("commit: attribute and caret");
                 let range = composition.GetRange()?;
                 let _ = self.clear_attribute(&range);
                 let _ = self.caret_after(&range);
-                crate::log!("commit: end composition");
                 composition.EndComposition(self.ec)?;
-                crate::log!("commit: done");
+                crate::log!("committed {} characters, composition ended", text.chars().count());
             }
             return Ok(());
         }

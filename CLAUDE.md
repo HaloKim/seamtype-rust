@@ -154,5 +154,8 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1   # build, copy to 
   harness calls the key and focus sinks itself; edit sessions and compositions are TSF's own.
 - Settings changes reach other processes through the files' modification times (no distributed
   notifications on Windows); `LearningEngine` reads lexicon.json back before writing.
+- Some apps hand each key press to the text service twice (Webex, a Qt app reaching TSF through
+  Windows' IMM32 bridge, typed `ddkkssss…`): a key-down with the same key and lParam as the last
+  one, before its key-up and not auto-repeat, is the same press (`DUPLICATE_WINDOW`).
 - Windows has no `/usr/share/dict/words`: `crates/core/data/spelling_trigrams.txt` holds its counts
   (`windows/tools/build_spelling_trigrams.py`).

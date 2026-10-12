@@ -11,6 +11,8 @@
 
 <p align="center"><a href="https://nyttastudio.com/seamtype/">웹사이트</a> · 한국어 · <a href="README.en.md">English</a></p>
 
+> **seamtype-rust**: [aimdevlee/seamtype](https://github.com/aimdevlee/seamtype)의 포크로, 같은 판정 엔진을 Rust로 옮긴 **Windows 입력기**를 더했습니다 → [`windows/`](windows/README.md)
+
 모든 글을 영문(QWERTY) 자판으로 치세요. 한/영 키는 이제 누르지 않아도 됩니다.
 Seamtype은 macOS 입력기로, **단어마다** 영어인지 한국어(두벌식)인지, 켜 두었다면 일본어(로마자)인지
 판단해서 맞는 글자로 입력합니다.

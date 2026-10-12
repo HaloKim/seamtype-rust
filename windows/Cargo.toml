@@ -6,7 +6,7 @@ members = ["crates/core", "crates/cli", "crates/tip", "crates/harness"]
 version = "0.1.5"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/HaloKim/seamtype"
+repository = "https://github.com/HaloKim/seamtype-rust"
 
 [workspace.dependencies]
 seamtype-core = { path = "crates/core" }

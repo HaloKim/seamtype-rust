@@ -13,6 +13,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use seamtype_core::{InputSession, Key, TextClient, TextRange};
 use windows::Win32::Foundation::{E_UNEXPECTED, LPARAM, WPARAM};
@@ -26,6 +27,7 @@ use windows::Win32::UI::TextServices::{
     ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl, ITfTextInputProcessor_Impl, ITfThreadMgr,
     ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, GUID_COMPARTMENT_EMPTYCONTEXT,
     GUID_COMPARTMENT_KEYBOARD_DISABLED, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, TF_INVALID_COOKIE, TF_PRESERVEDKEY,
+    TS_SS_TRANSITORY,
 };
 use windows_core::{implement, ComObject, Error, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, GUID};
 
@@ -47,6 +49,45 @@ pub struct State {
     /// Keys whose key-down was eaten: their key-up is eaten too.
     eaten: Vec<u32>,
     pause_key: bool,
+    /// The key press handled last, to recognize the same press delivered a second time.
+    last_down: Option<KeyPress>,
+    /// When the last key event came (for the log's timing).
+    last_event: Option<Instant>,
+    /// The document whose kind was logged last.
+    logged_context: usize,
+}
+
+/// A key press the session handled.
+struct KeyPress {
+    vk: u32,
+    lparam: isize,
+    at: Instant,
+    eaten: bool,
+    /// Its key-up came: a new press of the key is a new press.
+    released: bool,
+}
+
+/// Some apps hand the same key press to the text service twice (Qt apps such as Webex, through
+/// Windows' IMM32 bridge). A press can't repeat without its key going up first, unless it is
+/// auto-repeat (flagged in lParam), so a second delivery is the same key, same lParam, no key-up
+/// seen, within this window; the window only matters where key-ups never arrive.
+const DUPLICATE_WINDOW: Duration = Duration::from_millis(60);
+
+/// The kind of key a virtual key is, for the log (never which key).
+fn vk_kind(vk: u32) -> &'static str {
+    match vk {
+        0x41..=0x5A => "letter",
+        0x30..=0x39 | 0x60..=0x69 => "digit",
+        0x20 => "space",
+        0xBA..=0xC0 | 0xDB..=0xDF | 0x6A..=0x6F => "symbol",
+        0x08 => "backspace",
+        0x0D => "return",
+        0x1B => "escape",
+        0x10..=0x12 | 0xA0..=0xA5 | 0x5B | 0x5C | 0x14 => "modifier",
+        0x15 | 0x19 => "han/eng",
+        0x25..=0x28 => "arrow",
+        _ => "other",
+    }
 }
 
 #[implement(ITfTextInputProcessorEx, ITfKeyEventSink, ITfThreadMgrEventSink, ITfCompositionSink, ITfDisplayAttributeProvider)]
@@ -252,8 +293,55 @@ impl TextService_Impl {
         if let Ok(mut state) = self.state.try_borrow_mut() {
             if let Some(session) = state.session.as_mut() {
                 session.handle(key, &mut NullClient);
-                crate::log!("key {} idle", key.kind());
             }
+        }
+    }
+
+    /// Some(eaten) when this key-down is the press just handled, delivered again.
+    fn duplicate(&self, vk: u32, lparam: LPARAM) -> Option<bool> {
+        let state = self.state.try_borrow().ok()?;
+        let last = state.last_down.as_ref()?;
+        let repeat = (lparam.0 >> 30) & 1 == 1;
+        (last.vk == vk && last.lparam == lparam.0 && !repeat && !last.released && last.at.elapsed() < DUPLICATE_WINDOW)
+            .then_some(last.eaten)
+    }
+
+    /// Logs a key event: its kind, auto-repeat, the time since the last event, the outcome.
+    fn trace(&self, what: &str, vk: u32, lparam: LPARAM, outcome: &str) {
+        if !crate::log::enabled() {
+            return;
+        }
+        let now = Instant::now();
+        let gap = self
+            .state
+            .try_borrow_mut()
+            .ok()
+            .map(|mut s| s.last_event.replace(now).map(|t| now.duration_since(t).as_micros()).unwrap_or(0))
+            .unwrap_or(0);
+        let repeat = (lparam.0 >> 30) & 1;
+        crate::log!("{what} {} repeat={repeat} +{}.{:03}ms {outcome}", vk_kind(vk), gap / 1000, gap % 1000);
+    }
+
+    /// Logs what kind of document a context is, once per document: a transitory one is an
+    /// IMM32 app's, bridged by Windows (CUAS), which shows only the composition to TSF.
+    fn note_context(&self, context: &ITfContext) {
+        if !crate::log::enabled() {
+            return;
+        }
+        let id = context.as_raw() as usize;
+        let Ok(mut state) = self.state.try_borrow_mut() else { return };
+        if state.logged_context == id {
+            return;
+        }
+        state.logged_context = id;
+        drop(state);
+        match unsafe { context.GetStatus() } {
+            Ok(status) => crate::log!(
+                "document: static flags {:#x}{}",
+                status.dwStaticFlags,
+                if status.dwStaticFlags & TS_SS_TRANSITORY != 0 { " (transitory: an IMM32 app through CUAS)" } else { "" }
+            ),
+            Err(e) => crate::log!("document: no status ({e})"),
         }
     }
 
@@ -278,7 +366,6 @@ impl TextService_Impl {
                         state.session.as_mut().map(|s| s.handle(key, client)).unwrap_or(false)
                     })
                     .unwrap_or(false);
-                crate::log!("key {} handled={handled}", key.kind());
                 handled
             }
         }
@@ -437,6 +524,7 @@ impl TextService_Impl {
 
 impl ITfTextInputProcessor_Impl for TextService_Impl {
     fn Activate(&self, thread_mgr: Ref<ITfThreadMgr>, client_id: u32) -> Result<()> {
+        crate::log!("activating");
         crate::guard(|| self.activate(thread_mgr.ok()?, client_id))
     }
 
@@ -446,7 +534,8 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
 }
 
 impl ITfTextInputProcessorEx_Impl for TextService_Impl {
-    fn ActivateEx(&self, thread_mgr: Ref<ITfThreadMgr>, client_id: u32, _flags: u32) -> Result<()> {
+    fn ActivateEx(&self, thread_mgr: Ref<ITfThreadMgr>, client_id: u32, flags: u32) -> Result<()> {
+        crate::log!("activating (flags {flags:#x})");
         crate::guard(|| self.activate(thread_mgr.ok()?, client_id))
     }
 }
@@ -456,39 +545,74 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         Ok(())
     }
 
-    fn OnTestKeyDown(&self, context: Ref<ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
-        crate::guard(|| Ok(context.as_ref().map(|c| self.handle_key(c, wparam.0 as u32, true)).unwrap_or(false).into()))
-    }
-
-    fn OnKeyDown(&self, context: Ref<ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+    fn OnTestKeyDown(&self, context: Ref<ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         crate::guard(|| {
             let vk = wparam.0 as u32;
-            let eaten = context.as_ref().map(|c| self.handle_key(c, vk, false)).unwrap_or(false);
-            if eaten {
-                if let Ok(mut state) = self.state.try_borrow_mut() {
-                    if !state.eaten.contains(&vk) {
-                        state.eaten.push(vk);
-                    }
-                }
+            let Some(context) = context.as_ref() else { return Ok(false.into()) };
+            self.note_context(context);
+            if let Some(eaten) = self.duplicate(vk, lparam) {
+                self.trace("test-down", vk, lparam, "again: same press");
+                return Ok(eaten.into());
             }
+            let eaten = self.handle_key(context, vk, true);
+            self.trace("test-down", vk, lparam, if eaten { "claimed" } else { "passed" });
+            Ok(eaten.into())
+        })
+    }
+
+    fn OnKeyDown(&self, context: Ref<ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
+        crate::guard(|| {
+            let vk = wparam.0 as u32;
+            let Some(context) = context.as_ref() else { return Ok(false.into()) };
+            if let Some(eaten) = self.duplicate(vk, lparam) {
+                self.trace("down", vk, lparam, "again: same press, not handled twice");
+                return Ok(eaten.into());
+            }
+            let eaten = self.handle_key(context, vk, false);
+            if let Ok(mut state) = self.state.try_borrow_mut() {
+                if eaten && !state.eaten.contains(&vk) {
+                    state.eaten.push(vk);
+                }
+                state.last_down = Some(KeyPress { vk, lparam: lparam.0, at: Instant::now(), eaten, released: false });
+            }
+            self.trace("down", vk, lparam, if eaten { "eaten" } else { "passed" });
             self.update_langbar();
             Ok(eaten.into())
         })
     }
 
-    fn OnTestKeyUp(&self, _context: Ref<ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+    fn OnTestKeyUp(&self, _context: Ref<ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         crate::guard(|| {
-            let eaten = self.state.try_borrow().map(|s| s.eaten.contains(&(wparam.0 as u32))).unwrap_or(false);
+            let vk = wparam.0 as u32;
+            let eaten = match self.state.try_borrow_mut() {
+                Ok(mut state) => {
+                    if let Some(last) = state.last_down.as_mut().filter(|l| l.vk == vk) {
+                        last.released = true;
+                    }
+                    state.eaten.contains(&vk)
+                }
+                Err(_) => false,
+            };
+            self.trace("test-up", vk, lparam, if eaten { "claimed" } else { "passed" });
             Ok(eaten.into())
         })
     }
 
-    fn OnKeyUp(&self, _context: Ref<ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
+    fn OnKeyUp(&self, _context: Ref<ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
         crate::guard(|| {
-            let Ok(mut state) = self.state.try_borrow_mut() else { return Ok(false.into()) };
             let vk = wparam.0 as u32;
-            let eaten = state.eaten.contains(&vk);
-            state.eaten.retain(|&k| k != vk);
+            let eaten = match self.state.try_borrow_mut() {
+                Ok(mut state) => {
+                    if let Some(last) = state.last_down.as_mut().filter(|l| l.vk == vk) {
+                        last.released = true;
+                    }
+                    let eaten = state.eaten.contains(&vk);
+                    state.eaten.retain(|&k| k != vk);
+                    eaten
+                }
+                Err(_) => false,
+            };
+            self.trace("up", vk, lparam, if eaten { "eaten" } else { "passed" });
             Ok(eaten.into())
         })
     }
