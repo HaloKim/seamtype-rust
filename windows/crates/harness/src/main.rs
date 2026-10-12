@@ -6,20 +6,26 @@
 //! by the "app", as a real text field would. Nothing is registered and no real keyboard input
 //! or window focus is involved, so it runs on a machine in use.
 //!
-//!   seamtype-harness            run every scenario, print each result, exit 1 on a failure
+//!   seamtype-harness               run every scenario, print each result, exit 1 on a failure
+//!   seamtype-harness --registered  the same through the installed input method: TSF loads it
+//!                                  from the registry for this process and routes keys and focus
+//!   seamtype-harness <script>...   type each script into a new field and show what it left
 
 mod store;
 
 use std::process::ExitCode;
 
 use seamtype::{TextService, CLSID_SEAMTYPE};
+use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use store::Store;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::TextServices::{
-    CLSID_TF_ThreadMgr, ITextStoreACP, ITfClientId, ITfContext, ITfDocumentMgr, ITfKeyEventSink, ITfKeystrokeMgr,
-    ITfTextInputProcessorEx, ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEx, TF_TMAE_NOACTIVATETIP,
+    CLSID_TF_InputProcessorProfiles, CLSID_TF_ThreadMgr, GUID_TFCAT_TIP_KEYBOARD, ITextStoreACP, ITfClientId, ITfContext,
+    ITfDocumentMgr, ITfInputProcessorProfileMgr, ITfKeyEventSink, ITfKeystrokeMgr, ITfThreadMgr, ITfThreadMgrEventSink,
+    ITfThreadMgrEx, TF_INPUTPROCESSORPROFILE, TF_IPPMF_DONTCARECURRENTINPUTLANGUAGE, TF_IPPMF_FORPROCESS,
+    TF_PROFILETYPE_INPUTPROCESSOR, TF_TMAE_NOACTIVATETIP,
 };
 use windows_core::{ComObject, IUnknown, Interface, Result};
 
@@ -30,17 +36,20 @@ struct Document {
     store: ComObject<Store>,
 }
 
+/// How keys and focus reach the text service.
+enum Route {
+    /// Its sinks are called directly, as TSF calls them (TSF only routes keys and focus to an
+    /// input method it activated itself, from the registry).
+    Direct { keys: ITfKeyEventSink, focus: ITfThreadMgrEventSink },
+    /// The installed input method, activated by TSF for this process: TSF routes everything.
+    Tsf { profiles: ITfInputProcessorProfileMgr, previous: Option<TF_INPUTPROCESSORPROFILE> },
+}
+
 struct Harness {
     thread_mgr: ITfThreadMgr,
     app_client: u32,
-    #[allow(dead_code)]
     keystrokes: ITfKeystrokeMgr,
-    tip: ITfTextInputProcessorEx,
-    /// The text service's key sink, called the way TSF's keystroke manager calls it (TSF only
-    /// routes keys to an input method it activated itself, from the registry).
-    keys: ITfKeyEventSink,
-    /// Its focus sink, told about focus changes the way TSF tells it, for the same reason.
-    focus: ITfThreadMgrEventSink,
+    route: Route,
     /// Every field made so far stays alive, as an app's text fields do.
     documents: std::cell::RefCell<Vec<Document>>,
 }
@@ -103,7 +112,7 @@ fn press_for(ch: char) -> (VIRTUAL_KEY, bool, Typed) {
 }
 
 impl Harness {
-    fn new() -> Result<Harness> {
+    fn new(registered: bool) -> Result<Harness> {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let step = |what: &'static str| move |e: windows_core::Error| {
@@ -112,6 +121,28 @@ impl Harness {
             };
             let thread_mgr: ITfThreadMgr =
                 CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER).map_err(step("create thread manager"))?;
+            let keystrokes: ITfKeystrokeMgr = thread_mgr.cast()?;
+            if registered {
+                let app_client = thread_mgr.Activate().map_err(step("activate thread manager"))?;
+                let profiles: ITfInputProcessorProfileMgr =
+                    CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
+                let mut previous = TF_INPUTPROCESSORPROFILE::default();
+                let previous = profiles.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut previous).ok().map(|_| previous);
+                profiles
+                    .ActivateProfile(
+                        TF_PROFILETYPE_INPUTPROCESSOR,
+                        seamtype::LANGID_KOREAN,
+                        &CLSID_SEAMTYPE,
+                        &seamtype::GUID_PROFILE,
+                        HKL::default(),
+                        TF_IPPMF_FORPROCESS | TF_IPPMF_DONTCARECURRENTINPUTLANGUAGE,
+                    )
+                    .map_err(step("activate Seamtype's profile (is it installed?)"))?;
+                let route = Route::Tsf { profiles, previous };
+                let harness = Harness { thread_mgr, app_client, keystrokes, route, documents: Default::default() };
+                harness.focus_window();
+                return Ok(harness);
+            }
             // No input method of the system's: only Seamtype's text service, activated below.
             let mut app_client = 0u32;
             thread_mgr
@@ -120,13 +151,55 @@ impl Harness {
                 .map_err(step("activate thread manager"))?;
             let tip_client =
                 thread_mgr.cast::<ITfClientId>()?.GetClientId(&CLSID_SEAMTYPE).map_err(step("client id"))?;
-            let tip: ITfTextInputProcessorEx = TextService::new().into();
-            let keystrokes: ITfKeystrokeMgr = thread_mgr.cast()?;
-            let keys: ITfKeyEventSink = tip.cast()?;
-            let focus: ITfThreadMgrEventSink = tip.cast()?;
-            let harness = Harness { thread_mgr, app_client, keystrokes, tip, keys, focus, documents: Default::default() };
-            harness.tip.ActivateEx(&harness.thread_mgr, tip_client, 0).map_err(step("activate text service"))?;
-            Ok(harness)
+            let tip: windows::Win32::UI::TextServices::ITfTextInputProcessorEx = TextService::new().into();
+            tip.ActivateEx(&thread_mgr, tip_client, 0).map_err(step("activate text service"))?;
+            let route = Route::Direct { keys: tip.cast()?, focus: tip.cast()? };
+            Ok(Harness { thread_mgr, app_client, keystrokes, route, documents: Default::default() })
+        }
+    }
+
+    /// Gives the thread a focused window of its own, off screen and never activated, so TSF
+    /// treats it as a thread that types (the user's foreground window is left alone).
+    fn focus_window(&self) {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        unsafe {
+            let class: Vec<u16> = "SeamtypeHarness\0".encode_utf16().collect();
+            let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap_or_default();
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: instance.into(),
+                lpszClassName: windows_core::PCWSTR(class.as_ptr()),
+                ..Default::default()
+            };
+            RegisterClassW(&wc);
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                windows_core::PCWSTR(class.as_ptr()),
+                windows_core::PCWSTR::null(),
+                WS_POPUP,
+                -32000,
+                -32000,
+                10,
+                10,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap_or_default();
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let focused = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(hwnd));
+            println!("  focus window: {:?} (set focus: {})", hwnd, focused.is_ok());
+            *FOCUS_WINDOW.lock().unwrap() = hwnd.0 as isize;
+        }
+    }
+
+    /// Puts back the input method this process had (registered runs only).
+    fn restore(&self) {
+        if let Route::Tsf { profiles, previous: Some(p) } = &self.route {
+            unsafe {
+                let _ = profiles.ActivateProfile(p.dwProfileType, p.langid, &p.clsid, &p.guidProfile, p.hkl, TF_IPPMF_FORPROCESS);
+            }
         }
     }
 
@@ -141,9 +214,15 @@ impl Harness {
             manager.CreateContext(self.app_client, 0, &unknown, &mut context, &mut cookie)?;
             let context = context.expect("context");
             manager.Push(&context)?;
+            let window = *FOCUS_WINDOW.lock().unwrap();
+            if window != 0 {
+                let _ = self.thread_mgr.AssociateFocus(windows::Win32::Foundation::HWND(window as *mut _), &manager);
+            }
             let previous = self.documents.borrow().last().map(|d| d.manager.clone());
             self.thread_mgr.SetFocus(&manager)?;
-            self.focus.OnSetFocus(&manager, previous.as_ref())?;
+            if let Route::Direct { focus, .. } = &self.route {
+                focus.OnSetFocus(&manager, previous.as_ref())?;
+            }
             let document = Document { manager, context, store };
             self.documents.borrow_mut().push(document.clone());
             Ok(document)
@@ -177,11 +256,18 @@ impl Harness {
         let up = LPARAM((1 | (scan << 16) | (0xC000_0000u32)) as isize);
         let context = &document.context;
         let eaten = unsafe {
-            if vk == VK_HANGUL {
-                self.keys.OnPreservedKey(context, &seamtype::GUID_PRESERVED_PAUSE).map(|b| b.as_bool()).unwrap_or(false)
-            } else {
-                let test = self.keys.OnTestKeyDown(context, wparam, down).map(|b| b.as_bool()).unwrap_or(false);
-                test && self.keys.OnKeyDown(context, wparam, down).map(|b| b.as_bool()).unwrap_or(false)
+            match &self.route {
+                Route::Direct { keys, .. } if vk == VK_HANGUL => {
+                    keys.OnPreservedKey(context, &seamtype::GUID_PRESERVED_PAUSE).map(|b| b.as_bool()).unwrap_or(false)
+                }
+                Route::Direct { keys, .. } => {
+                    let test = keys.OnTestKeyDown(context, wparam, down).map(|b| b.as_bool()).unwrap_or(false);
+                    test && keys.OnKeyDown(context, wparam, down).map(|b| b.as_bool()).unwrap_or(false)
+                }
+                Route::Tsf { .. } => {
+                    let test = self.keystrokes.TestKeyDown(wparam, down).map(|b| b.as_bool()).unwrap_or(false);
+                    test && self.keystrokes.KeyDown(wparam, down).map(|b| b.as_bool()).unwrap_or(false)
+                }
             }
         };
         if !eaten {
@@ -193,9 +279,17 @@ impl Harness {
             }
         }
         unsafe {
-            let test = self.keys.OnTestKeyUp(context, wparam, up).map(|b| b.as_bool()).unwrap_or(false);
-            if test {
-                let _ = self.keys.OnKeyUp(context, wparam, up);
+            match &self.route {
+                Route::Direct { keys, .. } => {
+                    if keys.OnTestKeyUp(context, wparam, up).map(|b| b.as_bool()).unwrap_or(false) {
+                        let _ = keys.OnKeyUp(context, wparam, up);
+                    }
+                }
+                Route::Tsf { .. } => {
+                    if self.keystrokes.TestKeyUp(wparam, up).map(|b| b.as_bool()).unwrap_or(false) {
+                        let _ = self.keystrokes.KeyUp(wparam, up);
+                    }
+                }
             }
         }
         self.set_shift(false);
@@ -207,6 +301,17 @@ impl Harness {
             self.press(document, ch);
         }
     }
+}
+
+static FOCUS_WINDOW: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
+
+unsafe extern "system" fn window_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
 struct Report {
@@ -232,7 +337,12 @@ fn main() -> ExitCode {
     let _ = std::fs::create_dir_all(&dir);
     unsafe { std::env::set_var("SEAMTYPE_SUPPORT_DIR", &dir) };
 
-    let harness = match Harness::new() {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let registered = args.first().map(|a| a == "--registered").unwrap_or(false);
+    if registered {
+        args.remove(0);
+    }
+    let harness = match Harness::new(registered) {
         Ok(h) => h,
         Err(e) => {
             println!("FAIL  setting up TSF: {e}");
@@ -242,7 +352,7 @@ fn main() -> ExitCode {
     let mut report = Report { passed: 0, failed: 0 };
 
     // `seamtype-harness <script>...`: type each script into a new field and show what it left.
-    let scripts: Vec<String> = std::env::args().skip(1).collect();
+    let scripts = args;
     if !scripts.is_empty() {
         for script in scripts {
             if let Ok(document) = harness.document() {
@@ -250,6 +360,7 @@ fn main() -> ExitCode {
                 println!("{script:?} → {:?} (compositions {})", document.store.text(), document.store.compositions.get());
             }
         }
+        harness.restore();
         return ExitCode::SUCCESS;
     }
 
@@ -329,6 +440,7 @@ fn main() -> ExitCode {
         }
     }
 
+    harness.restore();
     println!("\n{} passed, {} failed", report.passed, report.failed);
     if std::env::var_os("SEAMTYPE_LOG").is_some() {
         if let Ok(log) = std::fs::read_to_string(dir.join("seamtype.log")) {
