@@ -160,8 +160,14 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1   # build, copy to 
   (not the global ones), only the last character composes (an interim character) and everything
   before it goes to the app as typed. `ImmWord` in client.rs composes such words one character at
   a time and never sends delivered text again; changing it means injected Backspaces (with
-  `inject::MAGIC`) and a marker key (F24) that resumes the word. The harness covers it with a
-  transitory store and an injector hook.
+  `inject::MAGIC`) and a marker key (F24) that resumes the word. The bridge also decides at the
+  key test: a key the text service claims never reaches the app even if `OnKeyDown` lets it go, so
+  there it claims only what the session can use, types the space or punctuation after a word
+  itself, and sends other let-go keys back. The harness covers all of it with a transitory store
+  that loses claimed keys the same way, and an injector hook.
+- The diagnostic log (`debug` in %APPDATA%\Seamtype) runs inside every app; on machines whose
+  security software checks file access it must stay light: one open file, no per-message tracing
+  unless `debug-messages` asks for it (Webex froze under it once).
 - Some apps hand each key press to the text service twice (Webex, a Qt app reaching TSF through
   Windows' IMM32 bridge, typed `ddkkssss…`): a key-down with the same key and lParam as the last
   one, before its key-up and not auto-repeat, is the same press (`DUPLICATE_WINDOW`).
