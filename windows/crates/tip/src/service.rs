@@ -514,13 +514,12 @@ impl TextService_Impl {
         let Ok(mut state) = self.state.try_borrow_mut() else { return false };
         let pass = std::mem::take(&mut state.imm.pass_key);
         let mut erase = state.imm.pending.as_ref().map(|p| p.erase);
-        if erase == Some(0) {
-            // One marker on its way at a time: two would bring the steps closer together.
-            if state.imm.continuing {
-                erase = None;
-            } else {
-                state.imm.continuing = true;
-            }
+        if erase == Some(0) && state.imm.markers > 0 {
+            // A marker on its way goes on with it: two would bring the steps closer together.
+            erase = None;
+        }
+        if erase.is_some() {
+            state.imm.markers += 1;
         }
         if erase.is_some() {
             state.replacing = Some(Instant::now());
@@ -592,8 +591,15 @@ impl TextService_Impl {
     /// The marker came back: the app erased what it had to, so the word goes on.
     fn finish_replacement(&self, context: &ITfContext) {
         let pending = self.state.try_borrow_mut().ok().and_then(|mut s| {
+            s.imm.markers = s.imm.markers.saturating_sub(1);
+            if s.imm.markers > 0 {
+                // Not the last marker sent: what it was sent after may not have reached the app.
+                if !s.eaten.contains(&inject::MARKER) {
+                    s.eaten.push(inject::MARKER);
+                }
+                return None;
+            }
             s.replacing = None;
-            s.imm.continuing = false;
             if !s.eaten.contains(&inject::MARKER) {
                 s.eaten.push(inject::MARKER);
             }

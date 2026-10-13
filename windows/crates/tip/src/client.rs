@@ -52,8 +52,10 @@ pub struct ImmWord {
     /// When the character now composed began, for the app (a new composition, or the rest of
     /// one whose front was handed over; see `too_soon`).
     pub last_step: Option<std::time::Instant>,
-    /// A marker key to go on is on its way: one at a time.
-    pub continuing: bool,
+    /// Marker keys sent and not back yet. The word goes on only when the last one is back: an
+    /// earlier one (a step's, sent with a delay) can come back before Backspaces sent after it,
+    /// and going on then had the app erase the wrong character (연세대 typed 세대 in Chrome).
+    pub markers: u32,
     /// What came while a commit was still going in, in order: it follows the commit.
     pub queue: Vec<Queued>,
 }

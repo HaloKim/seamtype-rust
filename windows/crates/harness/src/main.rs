@@ -339,6 +339,11 @@ impl Harness {
                 match injection {
                     seamtype::Injection::Erase(count) => {
                         ERASES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // Markers sent earlier for later come back first (Chrome: 연세대).
+                        let early: Vec<_> = std::mem::take(&mut *DEFERRED.lock().unwrap());
+                        for _ in early {
+                            self.marker(document);
+                        }
                         for _ in 0..count {
                             document.store.app_backspace();
                         }
@@ -570,6 +575,7 @@ fn main() -> ExitCode {
         ("dkssud claude ", "안녕 claude "),
         ("Hello, World! ", "Hello, World! "),
         ("dlrjs githubdp commitgkf rjdi.", "이건 github에 commit할 거야."),
+        ("dustpeo ", "연세대 "),
     ] {
         let Ok(document) = harness.document_with(true) else { continue };
         for ch in script.chars() {
