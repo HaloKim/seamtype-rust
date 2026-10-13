@@ -165,6 +165,11 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1   # build, copy to 
   there it claims only what the session can use, types the space or punctuation after a word
   itself, and sends other let-go keys back. The harness covers all of it with a transitory store
   that loses claimed keys the same way, and an injector hook.
+- Some IMM32 apps (Tabby, through xterm.js) take no more of a composition than it showed: 래
+  replaced by `fo` at once reached Tabby as `f`. Edits of one edit session reach the app as one
+  change, so `ImmWord` hands over one character per session, in place of the one composed, and the
+  rest waits for the marker key (`Pending` with nothing to erase). The harness store emulates such
+  an app (`Store::received`).
 - The session knows such a field by `TextClient::delivers_all_but_last` and, while the engine is
   unsure of an English reading, shows a one-character Korean reading instead (`early_display`,
   which keeps an, ant from being handed over before 무슨 turns Korean). What's on screen (`shown`,

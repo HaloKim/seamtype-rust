@@ -320,7 +320,12 @@ impl Harness {
         }
         self.set_shift(false);
         // Keys the text service sent: the app gets them (Backspaces, then the marker comes back).
+        // The marker coming back may send more (a longer change goes on one character per edit).
+        loop {
         let injected: Vec<seamtype::Injection> = std::mem::take(&mut *INJECTED.lock().unwrap());
+        if injected.is_empty() {
+            break;
+        }
         for injection in injected {
             match injection {
                 seamtype::Injection::Erase(count) => {
@@ -334,6 +339,7 @@ impl Harness {
                 seamtype::Injection::Key(k) if k == VK_RETURN.0 as u32 => document.store.app_insert("\n"),
                 seamtype::Injection::Key(_) => {}
             }
+        }
         }
         eaten
     }
@@ -456,6 +462,8 @@ fn main() -> ExitCode {
         ("dkssud⇄jk ⇄dkssud ", "안녕jk 안녕 "),
         ("githubdp ⎋", "githubdp "),
         ("don't ", "don't "),
+        ("fork ", "fork "),
+        ("dkssud fork ", "안녕 fork "),
     ];
     for (script, expected) in scripts {
         let document = match harness.document() {
@@ -488,6 +496,10 @@ fn main() -> ExitCode {
         ("hello⌫⌫p ", "help "),
         ("dhsmf 3tl", "오늘 3시"),
         ("dho?", "왜?"),
+        ("fork ", "fork "),
+        ("dkssud fork ", "안녕 fork "),
+        ("hello fork ", "hello fork "),
+        ("fork", "fork"),
     ];
     for (script, expected) in imm_scripts {
         let Ok(document) = harness.document_with(true) else { continue };
@@ -497,7 +509,12 @@ fn main() -> ExitCode {
             longest = longest.max(document.store.compositions.get().max(0) as usize);
         }
         let text = document.store.text();
-        report.check(&format!("imm: {script}"), text == *expected && longest <= 1, format!("got {text:?}, expected {expected:?}"));
+        let received = document.store.received();
+        report.check(
+            &format!("imm: {script}"),
+            text == *expected && longest <= 1 && received == *expected,
+            format!("got {text:?}, an xterm-like app {received:?}, expected {expected:?}"),
+        );
     }
 
     // The start of a Korean word that could be English (an, ant → 무슨) isn't handed to the app

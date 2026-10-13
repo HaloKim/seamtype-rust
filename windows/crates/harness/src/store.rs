@@ -30,6 +30,19 @@ pub struct Store {
     pub compositions: Cell<i32>,
     /// Reports itself as transitory, as Windows' IMM32 bridge does for apps that aren't TSF-aware.
     pub transitory: Cell<bool>,
+    /// The composition's extent, as TSF last reported it.
+    comp: Cell<Option<(i32, i32)>>,
+    /// The composition existed when the current lock began, and how long it was then.
+    inherited: Cell<bool>,
+    old_len: Cell<i32>,
+    /// What that composition handed over during the lock, and what compositions begun in it did.
+    inherited_out: RefCell<String>,
+    fresh_out: RefCell<String>,
+    /// What an app that takes no more of a composition than it showed got (Tabby, xterm.js:
+    /// 래 handed over as `fo` reached it as `f`).
+    received: RefCell<String>,
+    /// Characters such an app lost.
+    pub lost: Cell<usize>,
 }
 
 impl Store {
@@ -40,7 +53,34 @@ impl Store {
             queued: Cell::new(0),
             compositions: Cell::new(0),
             transitory: Cell::new(false),
+            comp: Cell::new(None),
+            inherited: Cell::new(false),
+            old_len: Cell::new(0),
+            inherited_out: RefCell::new(String::new()),
+            fresh_out: RefCell::new(String::new()),
+            received: RefCell::new(String::new()),
+            lost: Cell::new(0),
         }
+    }
+
+    /// What an xterm.js-like app shows: what it received, and what is composed.
+    pub fn received(&self) -> String {
+        let mut out = self.received.borrow().clone();
+        if let Some((s, e)) = self.comp.get() {
+            out.push_str(&self.slice(s, e));
+        }
+        out
+    }
+
+    fn slice(&self, s: i32, e: i32) -> String {
+        let inner = self.inner.borrow();
+        let (s, e) = (s.max(0) as usize, (e.max(0) as usize).min(inner.text.len()));
+        if s >= e { String::new() } else { String::from_utf16_lossy(&inner.text[s..e]) }
+    }
+
+    fn handed_over(&self, s: i32, e: i32) {
+        let piece = self.slice(s, e);
+        if self.inherited.get() { self.inherited_out.borrow_mut().push_str(&piece) } else { self.fresh_out.borrow_mut().push_str(&piece) }
     }
 
     pub fn text(&self) -> String {
@@ -53,6 +93,7 @@ impl Store {
 
     /// The app types `s` itself (a key the input method passed on), and tells TSF.
     pub fn app_insert(&self, s: &str) {
+        self.received.borrow_mut().push_str(s);
         let (change, sink) = {
             let mut inner = self.inner.borrow_mut();
             let (start, end) = inner.selection;
@@ -72,6 +113,7 @@ impl Store {
 
     /// The app deletes the character before the caret (Backspace it got).
     pub fn app_backspace(&self) {
+        self.received.borrow_mut().pop();
         let (change, sink) = {
             let mut inner = self.inner.borrow_mut();
             let (start, end) = inner.selection;
@@ -106,8 +148,16 @@ impl Store {
         let sink = self.inner.borrow().sink.clone();
         let Some(sink) = sink else { return E_INVALIDARG };
         self.locked.set(flags);
+        self.inherited.set(self.comp.get().is_some());
+        self.old_len.set(self.comp.get().map(|(s, e)| e - s).unwrap_or(0));
         let result = unsafe { sink.OnLockGranted(TEXT_STORE_LOCK_FLAGS(flags & !TS_LF_SYNC)) };
         self.locked.set(0);
+        let inherited = std::mem::take(&mut *self.inherited_out.borrow_mut());
+        let kept: String = inherited.chars().take(self.old_len.get().max(0) as usize).collect();
+        self.lost.set(self.lost.get() + inherited.chars().count() - kept.chars().count());
+        let fresh = std::mem::take(&mut *self.fresh_out.borrow_mut());
+        self.received.borrow_mut().push_str(&kept);
+        self.received.borrow_mut().push_str(&fresh);
         match result {
             Ok(()) => S_OK,
             Err(e) => e.code(),
@@ -331,17 +381,36 @@ impl ITextStoreACP_Impl for Store_Impl {
 }
 
 impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
-    fn OnStartComposition(&self, _composition: Ref<ITfCompositionView>) -> Result<BOOL> {
+    fn OnStartComposition(&self, composition: Ref<ITfCompositionView>) -> Result<BOOL> {
         self.compositions.set(self.compositions.get() + 1);
+        self.inherited.set(false);
+        self.comp.set(composition.as_ref().and_then(|c| unsafe { c.GetRange() }.ok()).and_then(|r| extent(&r)));
         Ok(true.into())
     }
 
-    fn OnUpdateComposition(&self, _composition: Ref<ITfCompositionView>, _range: Ref<ITfRange>) -> Result<()> {
+    fn OnUpdateComposition(&self, composition: Ref<ITfCompositionView>, range: Ref<ITfRange>) -> Result<()> {
+        let new = range
+            .as_ref()
+            .cloned()
+            .or_else(|| composition.as_ref().and_then(|c| unsafe { c.GetRange() }.ok()))
+            .and_then(|r| extent(&r));
+        if let (Some((s, _)), Some((s2, _))) = (self.comp.get(), new) {
+            if s2 > s {
+                self.handed_over(s, s2);
+            }
+        }
+        self.comp.set(new);
         Ok(())
     }
 
-    fn OnEndComposition(&self, _composition: Ref<ITfCompositionView>) -> Result<()> {
+    fn OnEndComposition(&self, composition: Ref<ITfCompositionView>) -> Result<()> {
         self.compositions.set(self.compositions.get() - 1);
+        let last = composition.as_ref().and_then(|c| unsafe { c.GetRange() }.ok()).and_then(|r| extent(&r)).or(self.comp.get());
+        if let Some((s, e)) = last {
+            self.handed_over(s, e);
+        }
+        self.comp.set(None);
+        self.inherited.set(false);
         Ok(())
     }
 }
@@ -349,4 +418,11 @@ impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
 #[allow(dead_code)]
 fn _check(store: &windows_core::ComObject<Store>) -> ITextStoreACP {
     store.to_interface()
+}
+
+fn extent(range: &ITfRange) -> Option<(i32, i32)> {
+    let acp: windows::Win32::UI::TextServices::ITfRangeACP = range.cast().ok()?;
+    let (mut start, mut length) = (0i32, 0i32);
+    unsafe { acp.GetExtent(&mut start, &mut length) }.ok()?;
+    Some((start, start + length))
 }

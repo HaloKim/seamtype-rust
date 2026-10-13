@@ -480,7 +480,7 @@ impl TextService_Impl {
                         // An IMM32 app lost the key when it was claimed: a character goes in
                         // after the word, any other key is sent again.
                         if let Key::Printable(ch) = key {
-                            if client.commit_text(&ch.to_string()).is_ok() {
+                            if client.type_after(&ch.to_string()).is_ok() {
                                 return (true, false);
                             }
                         }
@@ -591,6 +591,8 @@ impl TextService_Impl {
                     crate::log!("imm: could not go on: {e}");
                 }
             });
+            // A longer change goes on one character per edit.
+            self.after_edit();
         }
     }
 

@@ -175,6 +175,7 @@ impl TsfClient<'_> {
 
     fn try_set_marked_text(&mut self, text: &str) -> Result<()> {
         if self.imm.is_some() {
+            self.settle()?;
             return self.imm_set(text);
         }
         if text.is_empty() {
@@ -212,6 +213,7 @@ impl TsfClient<'_> {
 
     fn try_insert_text(&mut self, text: &str, replacing: Option<TextRange>) -> Result<()> {
         if replacing.is_none() && self.imm.is_some() {
+            self.settle()?;
             return self.imm_commit(text);
         }
         if let Some(r) = replacing {
@@ -294,6 +296,19 @@ impl TsfClient<'_> {
         if rest.is_empty() {
             return self.end_empty();
         }
+        // One character per edit (see `defer`): a new composition starts with one character,
+        // and each edit hands over one in place of the one composed.
+        let all: Vec<char> = rest.chars().collect();
+        if self.composition.is_none() && all.len() > 1 {
+            self.compose_tail(&all[0].to_string())?;
+            self.defer(rest.to_string(), false);
+            return Ok(());
+        }
+        if all.len() > 2 {
+            self.compose_tail(&all[..2].iter().collect::<String>())?;
+            self.defer(all[1..].iter().collect(), false);
+            return Ok(());
+        }
         let range = match self.composition.as_ref() {
             Some(composition) => unsafe { composition.GetRange()? },
             None => {
@@ -352,8 +367,67 @@ impl TsfClient<'_> {
         self.commit_text(&rest)
     }
 
-    /// Puts `text` in as typed: through a composition ended at once, which the bridge passes on.
+    /// The rest of a change for the next edit, after the marker key comes back. Under Korean
+    /// rules the app gets one character at a time, each in place of the one composed, and some
+    /// apps keep only as many characters as were composed (Tabby, through xterm.js: 래 changed
+    /// to `for` at once typed f, then r). Edits of one session reach the app as one change, so a
+    /// longer one goes in over several.
+    fn defer(&mut self, text: String, commit: bool) {
+        if let Some(word) = self.imm.as_mut() {
+            crate::log!("imm: {} characters to go on after the marker", text.chars().count());
+            word.pending = Some(Pending { erase: 0, text, commit });
+        }
+    }
+
+    /// A step of a longer change left for the marker key, when the next key comes first: the
+    /// rest of a commit goes in now (all at once), the rest of what was composed is redone.
+    fn settle(&mut self) -> Result<()> {
+        let Some(word) = self.imm.as_mut() else { return Ok(()) };
+        match word.pending.take() {
+            Some(p) if p.erase == 0 && p.commit => {
+                word.delivered.clear();
+                self.commit_at_once(&p.text)
+            }
+            Some(p) if p.erase == 0 => Ok(()),
+            other => {
+                word.pending = other;
+                Ok(())
+            }
+        }
+    }
+
+    /// Types `text` after the word: behind the rest of a commit still to go in, if any.
+    pub fn type_after(&mut self, text: &str) -> Result<()> {
+        if let Some(Pending { erase: 0, text: rest, commit: true }) = self.imm.as_mut().and_then(|w| w.pending.as_mut()) {
+            rest.push_str(text);
+            return Ok(());
+        }
+        self.commit_text(text)
+    }
+
+    /// Puts `text` in as typed: through a composition ended at once, which the bridge passes on;
+    /// in an IMM32 app one character per edit.
     pub fn commit_text(&mut self, text: &str) -> Result<()> {
+        if self.imm.is_some() {
+            let all: Vec<char> = text.chars().collect();
+            if all.len() > 1 {
+                if self.composition.is_none() {
+                    self.compose_tail(&all[0].to_string())?;
+                    self.defer(text.to_string(), true);
+                } else {
+                    self.compose_tail(&all[..2].iter().collect::<String>())?;
+                    if let Some(word) = self.imm.as_mut() {
+                        word.delivered.clear();
+                    }
+                    self.defer(all[1..].iter().collect(), true);
+                }
+                return Ok(());
+            }
+        }
+        self.commit_at_once(text)
+    }
+
+    fn commit_at_once(&mut self, text: &str) -> Result<()> {
         if self.composition.is_none() && text.is_empty() {
             return Ok(());
         }
