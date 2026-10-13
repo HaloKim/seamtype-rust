@@ -64,6 +64,9 @@ fn main() {
             if let Some(v) = env_f64("SEAMTYPE_SWITCH") {
                 heuristic.switch_bias_factor = v;
             }
+            if let Some(v) = env_f64("SEAMTYPE_KO_CLEAN") {
+                heuristic.clean_korean_floor = Some(v);
+            }
             if let Some(v) = env_f64("SEAMTYPE_RARE") {
                 heuristic.rare_word_floor_penalty = v;
             }

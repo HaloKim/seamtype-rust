@@ -186,6 +186,13 @@ pub struct HeuristicEngine {
     /// How far Japanese must lead before a known English word is turned into kana
     /// outside Japanese text.
     pub english_word_protection: f64,
+    /// Score floor for Korean that reads cleanly (three or more syllables, all of them common,
+    /// no stray jamo) when the keys aren't an English word: loanwords missing from the word
+    /// lists (리드미 typed as flemal, even after an English word). On the top 10,000 words of each
+    /// language in context (tools/eval_context.py) -2.0 took wrong words from 488 to 456 with no
+    /// English word turned; of the top 50,000 English words 35 rare names (chandi, quantico) turn
+    /// Korean.
+    pub clean_korean_floor: Option<f64>,
 }
 
 impl HeuristicEngine {
@@ -205,6 +212,7 @@ impl HeuristicEngine {
             switch_bias_factor: 0.25,
             korean_known_floor: (-1.4, -2.0),
             english_word_protection: 1.0,
+            clean_korean_floor: Some(-2.0),
         }
     }
 }
@@ -244,7 +252,7 @@ impl DecisionEngine for HeuristicEngine {
         }
 
         let mut k: Option<KoreanScore> = self.korean.score(keys, context.partial);
-        let known_korean = k
+        let mut known_korean = k
             .as_ref()
             .map(|s| !s.composition.has_stray_jamo() && self.korean.is_known_word(&s.composition.text()))
             .unwrap_or(false);
@@ -256,6 +264,16 @@ impl DecisionEngine for HeuristicEngine {
                     self.korean_known_floor.1
                 };
                 score.average_log_probability = score.average_log_probability.max(floor);
+            }
+        }
+        if !known && !known_korean {
+            if let (Some(floor), Some(score)) = (self.clean_korean_floor, k.as_mut()) {
+                let c = &score.composition;
+                if !c.has_stray_jamo() && c.syllable_count() >= 3 && self.korean.all_syllables_known(c) {
+                    score.average_log_probability = score.average_log_probability.max(floor);
+                    // Counts as a Korean word for the previous word's pull, too.
+                    known_korean = true;
+                }
             }
         }
         // A dictionary English word may already be complete: score its Japanese reading as

@@ -32,6 +32,16 @@ fn english_words_stay_english() {
     }
 }
 
+/// A loanword missing from the word lists, reading as clean common syllables, is Korean even
+/// right after an English word (리드미, not flemal); an English word next to it stays English.
+#[test]
+fn clean_korean_loanword_after_english() {
+    let after_english = DecisionContext::new(Some(Language::English), false);
+    let d = SHARED_ENGINE.decide("flemal", &after_english);
+    assert_eq!((d.language, d.output.as_str()), (Language::Korean, "리드미"), "{}", d.explanation);
+    assert_eq!(SHARED_ENGINE.decide("fork", &after_english).language, Language::English);
+}
+
 #[test]
 fn korean_keystrokes_become_hangul() {
     for (keys, expected) in [
