@@ -32,14 +32,15 @@ pub struct Store {
     pub transitory: Cell<bool>,
     /// The composition's extent, as TSF last reported it.
     comp: Cell<Option<(i32, i32)>>,
-    /// The composition existed when the current lock began, and how long it was then.
-    inherited: Cell<bool>,
-    old_len: Cell<i32>,
-    /// What that composition handed over during the lock, and what compositions begun in it did.
-    inherited_out: RefCell<String>,
-    fresh_out: RefCell<String>,
-    /// What an app that takes no more of a composition than it showed got (Tabby, xterm.js:
-    /// 래 handed over as `fo` reached it as `f`).
+    /// Locks granted so far, and the one the composition began in (as the app sees it: handing
+    /// over the front of a composition ends it there and begins a new one).
+    locks: Cell<u32>,
+    born: Cell<u32>,
+    /// How long the composition was when time last passed (`tick`), None if it began since.
+    settled: Cell<Option<i32>>,
+    /// What an app like Tabby (xterm.js) got: it notes a composition's extent only on a timer
+    /// after each change, and takes what the composition hands over by that extent. A
+    /// composition begun and ended in one change goes in whole.
     received: RefCell<String>,
     /// Characters such an app lost.
     pub lost: Cell<usize>,
@@ -54,10 +55,9 @@ impl Store {
             compositions: Cell::new(0),
             transitory: Cell::new(false),
             comp: Cell::new(None),
-            inherited: Cell::new(false),
-            old_len: Cell::new(0),
-            inherited_out: RefCell::new(String::new()),
-            fresh_out: RefCell::new(String::new()),
+            locks: Cell::new(0),
+            born: Cell::new(0),
+            settled: Cell::new(None),
             received: RefCell::new(String::new()),
             lost: Cell::new(0),
         }
@@ -78,9 +78,20 @@ impl Store {
         if s >= e { String::new() } else { String::from_utf16_lossy(&inner.text[s..e]) }
     }
 
+    /// Time passes: the app's timers run.
+    pub fn tick(&self) {
+        self.settled.set(self.comp.get().map(|(s, e)| e - s));
+    }
+
     fn handed_over(&self, s: i32, e: i32) {
         let piece = self.slice(s, e);
-        if self.inherited.get() { self.inherited_out.borrow_mut().push_str(&piece) } else { self.fresh_out.borrow_mut().push_str(&piece) }
+        let kept: String = if self.born.get() == self.locks.get() {
+            piece.clone()
+        } else {
+            piece.chars().take(self.settled.get().unwrap_or(0).max(0) as usize).collect()
+        };
+        self.lost.set(self.lost.get() + piece.chars().count() - kept.chars().count());
+        self.received.borrow_mut().push_str(&kept);
     }
 
     pub fn text(&self) -> String {
@@ -148,16 +159,9 @@ impl Store {
         let sink = self.inner.borrow().sink.clone();
         let Some(sink) = sink else { return E_INVALIDARG };
         self.locked.set(flags);
-        self.inherited.set(self.comp.get().is_some());
-        self.old_len.set(self.comp.get().map(|(s, e)| e - s).unwrap_or(0));
+        self.locks.set(self.locks.get() + 1);
         let result = unsafe { sink.OnLockGranted(TEXT_STORE_LOCK_FLAGS(flags & !TS_LF_SYNC)) };
         self.locked.set(0);
-        let inherited = std::mem::take(&mut *self.inherited_out.borrow_mut());
-        let kept: String = inherited.chars().take(self.old_len.get().max(0) as usize).collect();
-        self.lost.set(self.lost.get() + inherited.chars().count() - kept.chars().count());
-        let fresh = std::mem::take(&mut *self.fresh_out.borrow_mut());
-        self.received.borrow_mut().push_str(&kept);
-        self.received.borrow_mut().push_str(&fresh);
         match result {
             Ok(()) => S_OK,
             Err(e) => e.code(),
@@ -383,7 +387,8 @@ impl ITextStoreACP_Impl for Store_Impl {
 impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
     fn OnStartComposition(&self, composition: Ref<ITfCompositionView>) -> Result<BOOL> {
         self.compositions.set(self.compositions.get() + 1);
-        self.inherited.set(false);
+        self.born.set(self.locks.get());
+        self.settled.set(None);
         self.comp.set(composition.as_ref().and_then(|c| unsafe { c.GetRange() }.ok()).and_then(|r| extent(&r)));
         Ok(true.into())
     }
@@ -397,6 +402,8 @@ impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
         if let (Some((s, _)), Some((s2, _))) = (self.comp.get(), new) {
             if s2 > s {
                 self.handed_over(s, s2);
+                self.born.set(self.locks.get());
+                self.settled.set(None);
             }
         }
         self.comp.set(new);
@@ -410,7 +417,6 @@ impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
             self.handed_over(s, e);
         }
         self.comp.set(None);
-        self.inherited.set(false);
         Ok(())
     }
 }

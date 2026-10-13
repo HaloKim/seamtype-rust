@@ -255,6 +255,8 @@ impl Harness {
     /// Presses one key as an app's message loop would hand it to TSF; returns whether the text
     /// service ate it.
     fn press(&self, document: &Document, ch: char) -> bool {
+        // Time passes between key presses.
+        document.store.tick();
         self.press_with(document, ch, 1, false)
     }
 
@@ -338,6 +340,11 @@ impl Harness {
                 seamtype::Injection::Key(k) if k == VK_BACK.0 as u32 => document.store.app_backspace(),
                 seamtype::Injection::Key(k) if k == VK_RETURN.0 as u32 => document.store.app_insert("\n"),
                 seamtype::Injection::Key(_) => {}
+                seamtype::Injection::Continue => {
+                    // A moment passes first.
+                    document.store.tick();
+                    self.marker(document);
+                }
             }
         }
         }

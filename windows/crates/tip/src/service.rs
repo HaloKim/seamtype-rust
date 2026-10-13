@@ -518,8 +518,14 @@ impl TextService_Impl {
             state.replacing = Some(Instant::now());
         }
         drop(state);
-        if let Some(erase) = erase {
-            inject::send(Injection::Erase(erase));
+        match erase {
+            Some(0) => {
+                inject::send(Injection::Continue);
+            }
+            Some(erase) => {
+                inject::send(Injection::Erase(erase));
+            }
+            None => {}
         }
         pass
     }
