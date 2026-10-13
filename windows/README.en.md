@@ -29,6 +29,9 @@ options → Keyboards.
 
 - For 32-bit apps (KakaoTalk and others) run `rustup target add i686-pc-windows-msvc` first; the script
   then builds and registers the x86 copy too.
+- It puts Seamtype first among your Korean keyboards and makes it the default input method, so it is
+  what Windows starts with after a restart or sign-in; add `-NotDefault` to leave that alone. Removing
+  Seamtype clears the default again.
 - Updating is the same command. Apps already running use the new version once restarted.
 - To remove it: `powershell -ExecutionPolicy Bypass -File windows\scripts\uninstall.ps1`
   (`-RemoveSettings` also drops settings and learned words).

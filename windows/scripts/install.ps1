@@ -1,14 +1,16 @@
 ﻿# Seamtype for Windows: installs or updates the input method.
 #
-#   powershell -ExecutionPolicy Bypass -File windows\scripts\install.ps1 [-NoBuild]
+#   powershell -ExecutionPolicy Bypass -File windows\scripts\install.ps1 [-NoBuild] [-NotDefault]
 #
 # Builds the text service (x64, and x86 for 32-bit apps when that Rust target is installed)
 # unless -NoBuild, copies it to %ProgramFiles%\Seamtype, registers it (one UAC prompt), and adds
-# Seamtype to your Korean keyboards. Apps already running keep the copy they loaded until they
+# Seamtype to your Korean keyboards: first in the list and the default input method (what Windows
+# starts with after signing in), unless -NotDefault. Apps already running keep the copy they loaded until they
 # restart; a new window of theirs may need the app restarted to pick up the update.
 [CmdletBinding()]
 param(
     [switch]$NoBuild,
+    [switch]$NotDefault,
     # Internal: the copy-and-register part, run as administrator from the staged files.
     [switch]$Elevated,
     [string]$Source
@@ -109,6 +111,19 @@ public static extern bool InstallLayoutOrTip(string psz, uint flags);
 '@
 if (-not [SeamtypeSetup.Input]::InstallLayoutOrTip($Tip, 0)) {
     Write-Warning 'Could not add Seamtype to your keyboards: add it in Settings > Time & language > Language & region > Korean > Language options > Keyboards.'
+} elseif (-not $NotDefault) {
+    # First among the Korean keyboards, and the default input method: otherwise Windows starts
+    # every sign-in with the keyboard listed first (usually Microsoft's).
+    $languages = Get-WinUserLanguageList
+    $korean = $languages | Where-Object { $_.LanguageTag -like 'ko*' } | Select-Object -First 1
+    if ($korean) {
+        [string[]]$others = @($korean.InputMethodTips | Where-Object { $_ -ne $Tip } | ForEach-Object { [string]$_ })
+        $korean.InputMethodTips.Clear()
+        $korean.InputMethodTips.Add($Tip)
+        foreach ($other in $others) { $korean.InputMethodTips.Add($other) }
+        Set-WinUserLanguageList $languages -Force -WarningAction SilentlyContinue
+    }
+    Set-WinDefaultInputMethodOverride -InputTip $Tip
 }
 
 Write-Host ''

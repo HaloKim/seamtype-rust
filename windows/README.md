@@ -28,6 +28,8 @@ Seamtype을 추가하니, **Win+Space**로 한국어 → Seamtype을 고르면 �
 
 - 32비트 앱(카카오톡 등)에도 쓰려면 먼저 `rustup target add i686-pc-windows-msvc`를 실행하세요.
   설치 스크립트가 x86판도 빌드해서 함께 등록합니다.
+- 한국어 키보드 목록의 맨 앞에 두고 기본 입력 방법으로 지정하므로, 재부팅하거나 다시 로그인해도
+  Seamtype으로 시작합니다. 원하지 않으면 `-NotDefault`를 붙이세요. 제거하면 기본 지정도 풀립니다.
 - 업데이트도 같은 명령입니다. 이미 실행 중인 앱은 다시 시작해야 새 버전을 씁니다.
 - 지우기: `powershell -ExecutionPolicy Bypass -File windows\scripts\uninstall.ps1`.
   설정과 학습한 단어까지 지우려면 `-RemoveSettings`를 붙이세요.

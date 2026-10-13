@@ -35,6 +35,11 @@ public static extern bool InstallLayoutOrTip(string psz, uint flags);
 '@
 # ILOT_UNINSTALL
 [void][SeamtypeSetup.Input]::InstallLayoutOrTip($Tip, 1)
+# No longer the default input method (Windows goes back to the first keyboard in the list).
+$profileKey = 'HKCU:\Control Panel\International\User Profile'
+if ((Get-ItemProperty $profileKey -ErrorAction SilentlyContinue).InputMethodOverride -eq $Tip) {
+    Remove-ItemProperty $profileKey -Name InputMethodOverride -ErrorAction SilentlyContinue
+}
 
 Write-Host 'Unregistering Seamtype (Windows asks for administrator permission)...'
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Elevated')
