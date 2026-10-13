@@ -63,8 +63,9 @@ pub struct State {
     /// Backspaces Seamtype sent are on their way, until its marker comes back (or a moment passes).
     replacing: Option<Instant>,
     /// Single Backspaces Seamtype sent, still to come back: if a key's extra information doesn't
-    /// say it is Seamtype's, the next Backspaces are taken as these.
+    /// say it is Seamtype's, the next Backspaces are taken as these, for a moment after sending.
     expected_backspaces: u32,
+    expected_since: Option<Instant>,
 }
 
 /// How long Backspaces Seamtype sent may take to come back.
@@ -494,6 +495,7 @@ impl TextService_Impl {
                     if inject::send(Injection::Key(inject::BACKSPACE)) {
                         if let Ok(mut state) = self.state.try_borrow_mut() {
                             state.expected_backspaces += 1;
+                            state.expected_since = Some(Instant::now());
                         }
                     }
                     return true;
@@ -541,6 +543,14 @@ impl TextService_Impl {
             return Some(true);
         }
         if magic {
+            // One of the single Backspaces it sent, recognized as such: no longer expected (left
+            // counted, the user's own Backspace later would be taken for it and the word would
+            // no longer match what the app has).
+            if vk == inject::BACKSPACE && !down {
+                if let Ok(mut state) = self.state.try_borrow_mut() {
+                    state.expected_backspaces = state.expected_backspaces.saturating_sub(1);
+                }
+            }
             return Some(false);
         }
         if vk == inject::BACKSPACE {
@@ -551,6 +561,9 @@ impl TextService_Impl {
             // Counted on the first sight of the key (OnTestKeyDown comes first).
             if !down {
                 if let Ok(mut state) = self.state.try_borrow_mut() {
+                    if state.expected_since.is_none_or(|t| t.elapsed() >= REPLACING_WINDOW) {
+                        state.expected_backspaces = 0;
+                    }
                     if state.expected_backspaces > 0 {
                         state.expected_backspaces -= 1;
                         crate::log!("a Backspace taken as Seamtype's (expected)");
