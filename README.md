@@ -26,7 +26,19 @@ Windows 입력기(TSF)로 만든 포크**입니다. macOS판은 원본 저장소
 
 ## 설치
 
-Windows 10/11, 64비트. 빌드에 [Rust](https://rustup.rs)와 Visual Studio Build Tools(C++)가 필요합니다.
+Windows 10/11, 64비트.
+
+1. [Releases](https://github.com/HaloKim/seamtype-rust/releases/latest)에서 `Seamtype-Setup-<버전>.exe`를 받습니다.
+2. 실행해서 안내대로 설치합니다(관리자 확인 한 번). "Seamtype을 기본 입력기로 지정"을 켜 두면 재부팅해도
+   Seamtype으로 시작합니다.
+3. **Win+Space**로 한국어 → Seamtype을 고릅니다.
+
+업데이트는 새 설치 파일을 다시 실행하면 되고, 제거는 설정 → 앱 → 설치된 앱의 Seamtype에서 합니다. 이미
+실행 중인 앱은 다시 시작해야 새 버전을 씁니다.
+
+### 소스에서 빌드해 설치
+
+[Rust](https://rustup.rs)와 Visual Studio Build Tools(C++)가 필요합니다.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File windows\scripts\install.ps1
@@ -128,6 +140,7 @@ python ..\tools\eval_context.py target\release\seamtype-cli.exe ko_50k.txt en_50
 | `windows/crates/cli` | `seamtype-cli`: 판정 결과와 점수 확인 |
 | `windows/crates/harness` | 입력기를 등록하지 않고 Windows TSF로 끝까지 입력해 보는 검사 |
 | `windows/scripts` | 설치·제거 스크립트 |
+| `windows/installer` | 설치 파일(Inno Setup): `build.ps1`이 `windows\target\installer`에 만듦. `v*` 태그를 올리면 GitHub Actions가 만들어 Releases에 올림 |
 | `Sources/SeamtypeCore/Data` | 사전과 모델 데이터 (원본 저장소와 공유) |
 
 진단 로그가 필요하면 `%APPDATA%\Seamtype`에 `debug`라는 빈 파일을 만드세요. `seamtype.log`에 키 종류와

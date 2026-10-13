@@ -27,7 +27,19 @@ repository.
 
 ## Install
 
-Windows 10/11, 64-bit. Building needs [Rust](https://rustup.rs) and Visual Studio Build Tools (C++).
+Windows 10/11, 64-bit.
+
+1. Download `Seamtype-Setup-<version>.exe` from [Releases](https://github.com/HaloKim/seamtype-rust/releases/latest).
+2. Run it (one administrator prompt). Keep "Make Seamtype the default input method" checked for Windows to
+   start with it after a restart.
+3. Press **Win+Space** and choose Korean → Seamtype.
+
+To update, run a newer installer; to remove, use Settings → Apps → Installed apps → Seamtype. Apps already
+running use the new version once restarted.
+
+### Build from source and install
+
+Building needs [Rust](https://rustup.rs) and Visual Studio Build Tools (C++).
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File windows\scripts\install.ps1
@@ -132,6 +144,7 @@ python ..\tools\eval_context.py target\release\seamtype-cli.exe ko_50k.txt en_50
 | `windows/crates/cli` | `seamtype-cli`: decisions and their scores |
 | `windows/crates/harness` | End-to-end checks through Windows' TSF, nothing registered |
 | `windows/scripts` | Install and uninstall scripts |
+| `windows/installer` | The installer (Inno Setup): `build.ps1` makes it in `windows\target\installer`; pushing a `v*` tag has GitHub Actions build it into a release |
 | `Sources/SeamtypeCore/Data` | Dictionary and model data (shared with the original repository) |
 
 For a diagnostic log, create an empty file named `debug` in `%APPDATA%\Seamtype`. `seamtype.log` then gets
