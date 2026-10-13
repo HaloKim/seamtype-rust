@@ -255,8 +255,10 @@ impl Harness {
     /// Presses one key as an app's message loop would hand it to TSF; returns whether the text
     /// service ate it.
     fn press(&self, document: &Document, ch: char) -> bool {
-        // Time passes between key presses.
-        document.store.tick();
+        // Time passes between key presses (unless typing faster than the app's timers).
+        if !FAST.load(std::sync::atomic::Ordering::SeqCst) {
+            document.store.tick();
+        }
         self.press_with(document, ch, 1, false)
     }
 
@@ -321,34 +323,60 @@ impl Harness {
             }
         }
         self.set_shift(false);
-        // Keys the text service sent: the app gets them (Backspaces, then the marker comes back).
-        // The marker coming back may send more (a longer change goes on one character per edit).
+        self.replay(document);
+        eaten
+    }
+
+    /// Keys the text service sent: the app gets them (Backspaces, then the marker comes back).
+    /// The marker coming back may send more (a longer change goes on one character per edit).
+    fn replay(&self, document: &Document) {
         loop {
-        let injected: Vec<seamtype::Injection> = std::mem::take(&mut *INJECTED.lock().unwrap());
-        if injected.is_empty() {
-            break;
-        }
-        for injection in injected {
-            match injection {
-                seamtype::Injection::Erase(count) => {
-                    ERASES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    for _ in 0..count {
-                        document.store.app_backspace();
+            let injected: Vec<seamtype::Injection> = std::mem::take(&mut *INJECTED.lock().unwrap());
+            if injected.is_empty() {
+                break;
+            }
+            for injection in injected {
+                match injection {
+                    seamtype::Injection::Erase(count) => {
+                        ERASES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        for _ in 0..count {
+                            document.store.app_backspace();
+                        }
+                        self.marker(document);
                     }
-                    self.marker(document);
-                }
-                seamtype::Injection::Key(k) if k == VK_BACK.0 as u32 => document.store.app_backspace(),
-                seamtype::Injection::Key(k) if k == VK_RETURN.0 as u32 => document.store.app_insert("\n"),
-                seamtype::Injection::Key(_) => {}
-                seamtype::Injection::Continue => {
-                    // A moment passes first.
-                    document.store.tick();
-                    self.marker(document);
+                    seamtype::Injection::Key(k) if k == VK_BACK.0 as u32 => document.store.app_backspace(),
+                    seamtype::Injection::Key(k) if k == VK_RETURN.0 as u32 => document.store.app_insert("\n"),
+                    seamtype::Injection::Key(_) => {}
+                    seamtype::Injection::Continue => {
+                        let due = std::time::Instant::now() + seamtype::CONTINUE_DELAY;
+                        if FAST.load(std::sync::atomic::Ordering::SeqCst) {
+                            // Comes back later, among the keys still being typed.
+                            DEFERRED.lock().unwrap().push(due);
+                        } else {
+                            std::thread::sleep(seamtype::CONTINUE_DELAY);
+                            document.store.tick();
+                            self.marker(document);
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /// Markers sent for later whose moment has come.
+    fn press_marker_if_due(&self, document: &Document) {
+        let now = std::time::Instant::now();
+        let due: Vec<_> = {
+            let mut deferred = DEFERRED.lock().unwrap();
+            let (due, later): (Vec<_>, Vec<_>) = deferred.drain(..).partition(|t| *t <= now);
+            *deferred = later;
+            due
+        };
+        for _ in due {
+            document.store.tick();
+            self.marker(document);
+            self.replay(document);
         }
-        eaten
     }
 
     /// Seamtype's marker key coming back.
@@ -376,6 +404,12 @@ impl Harness {
 }
 
 static FOCUS_WINDOW: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
+
+/// Markers the text service sent for later (`Injection::Continue`), by when they come back.
+static DEFERRED: std::sync::Mutex<Vec<std::time::Instant>> = std::sync::Mutex::new(Vec::new());
+
+/// Keys come faster than an xterm.js-like app's timers run.
+static FAST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Keys the text service asked to send, instead of real input.
 static INJECTED: std::sync::Mutex<Vec<seamtype::Injection>> = std::sync::Mutex::new(Vec::new());
@@ -507,6 +541,9 @@ fn main() -> ExitCode {
         ("dkssud fork ", "안녕 fork "),
         ("hello fork ", "hello fork "),
         ("fork", "fork"),
+        ("claude ", "claude "),
+        ("claude eh ", "claude eh "),
+        ("dkssud claude ", "안녕 claude "),
     ];
     for (script, expected) in imm_scripts {
         let Ok(document) = harness.document_with(true) else { continue };
@@ -523,6 +560,36 @@ fn main() -> ExitCode {
             format!("got {text:?}, an xterm-like app {received:?}, expected {expected:?}"),
         );
     }
+
+    // Typed faster than Tabby's timers (xterm.js): a character handed over too soon after another
+    // was lost (claude came out clade). Steps wait for the timer, keys or not.
+    FAST.store(true, std::sync::atomic::Ordering::SeqCst);
+    for (script, expected) in [
+        ("claude ", "claude "),
+        ("fork ", "fork "),
+        ("dkssud claude ", "안녕 claude "),
+        ("Hello, World! ", "Hello, World! "),
+        ("dlrjs githubdp commitgkf rjdi.", "이건 github에 commit할 거야."),
+    ] {
+        let Ok(document) = harness.document_with(true) else { continue };
+        for ch in script.chars() {
+            harness.press_marker_if_due(&document);
+            harness.press(&document, ch);
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
+        // Then the app catches up and the last steps go in.
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(35));
+            harness.press_marker_if_due(&document);
+        }
+        let (text, received) = (document.store.text(), document.store.received());
+        report.check(
+            &format!("imm fast: {script}"),
+            text == expected && received == expected,
+            format!("got {text:?}, an xterm-like app {received:?}, expected {expected:?}"),
+        );
+    }
+    FAST.store(false, std::sync::atomic::Ordering::SeqCst);
 
     // The start of a Korean word that could be English (an, ant → 무슨) isn't handed to the app
     // while the engine is unsure, so nothing has to be erased again.

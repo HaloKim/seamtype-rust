@@ -38,6 +38,8 @@ pub struct Store {
     born: Cell<u32>,
     /// How long the composition was when time last passed (`tick`), None if it began since.
     settled: Cell<Option<i32>>,
+    /// The composition's changes since it began (when, how long), for the app's timer to catch.
+    changes: RefCell<Vec<(std::time::Instant, i32)>>,
     /// What an app like Tabby (xterm.js) got: it notes a composition's extent only on a timer
     /// after each change, and takes what the composition hands over by that extent. A
     /// composition begun and ended in one change goes in whole.
@@ -58,6 +60,7 @@ impl Store {
             locks: Cell::new(0),
             born: Cell::new(0),
             settled: Cell::new(None),
+            changes: RefCell::new(Vec::new()),
             received: RefCell::new(String::new()),
             lost: Cell::new(0),
         }
@@ -83,12 +86,30 @@ impl Store {
         self.settled.set(self.comp.get().map(|(s, e)| e - s));
     }
 
+    /// The app's timer runs this long after a change (a busy app's is later).
+    const APP_TIMER: std::time::Duration = std::time::Duration::from_millis(5);
+
+    /// The extent the app's timer has noted by now: after `tick`, or a change old enough.
+    fn noted(&self) -> Option<i32> {
+        let caught = self.changes.borrow().iter().rev().find(|(t, _)| t.elapsed() >= Self::APP_TIMER).map(|c| c.1);
+        match (self.settled.get(), caught) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn changed(&self) {
+        if let Some((s, e)) = self.comp.get() {
+            self.changes.borrow_mut().push((std::time::Instant::now(), e - s));
+        }
+    }
+
     fn handed_over(&self, s: i32, e: i32) {
         let piece = self.slice(s, e);
         let kept: String = if self.born.get() == self.locks.get() {
             piece.clone()
         } else {
-            piece.chars().take(self.settled.get().unwrap_or(0).max(0) as usize).collect()
+            piece.chars().take(self.noted().unwrap_or(0).max(0) as usize).collect()
         };
         self.lost.set(self.lost.get() + piece.chars().count() - kept.chars().count());
         self.received.borrow_mut().push_str(&kept);
@@ -389,7 +410,9 @@ impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
         self.compositions.set(self.compositions.get() + 1);
         self.born.set(self.locks.get());
         self.settled.set(None);
+        self.changes.borrow_mut().clear();
         self.comp.set(composition.as_ref().and_then(|c| unsafe { c.GetRange() }.ok()).and_then(|r| extent(&r)));
+        self.changed();
         Ok(true.into())
     }
 
@@ -404,9 +427,11 @@ impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
                 self.handed_over(s, s2);
                 self.born.set(self.locks.get());
                 self.settled.set(None);
+                self.changes.borrow_mut().clear();
             }
         }
         self.comp.set(new);
+        self.changed();
         Ok(())
     }
 

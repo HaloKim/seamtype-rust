@@ -49,6 +49,21 @@ pub struct ImmWord {
     pub pending: Option<Pending>,
     /// The Backspace being handled goes to the app, which erases one delivered character.
     pub pass_key: bool,
+    /// When the character now composed began, for the app (a new composition, or the rest of
+    /// one whose front was handed over; see `too_soon`).
+    pub last_step: Option<std::time::Instant>,
+    /// A marker key to go on is on its way: one at a time.
+    pub continuing: bool,
+    /// What came while a commit was still going in, in order: it follows the commit.
+    pub queue: Vec<Queued>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Queued {
+    /// Text typed as finished (a word's commit, a space).
+    Commit(String),
+    /// What the next word shows while it is typed (the latest replaces the one before).
+    Show(String),
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +191,10 @@ impl TsfClient<'_> {
     fn try_set_marked_text(&mut self, text: &str) -> Result<()> {
         if self.imm.is_some() {
             self.settle()?;
+            if self.committing() {
+                self.queue(Queued::Show(text.to_string()));
+                return Ok(());
+            }
             return self.imm_set(text);
         }
         if text.is_empty() {
@@ -214,6 +233,10 @@ impl TsfClient<'_> {
     fn try_insert_text(&mut self, text: &str, replacing: Option<TextRange>) -> Result<()> {
         if replacing.is_none() && self.imm.is_some() {
             self.settle()?;
+            if self.committing() {
+                self.queue(Queued::Commit(text.to_string()));
+                return Ok(());
+            }
             return self.imm_commit(text);
         }
         if let Some(r) = replacing {
@@ -304,6 +327,10 @@ impl TsfClient<'_> {
             self.defer(rest.to_string(), false);
             return Ok(());
         }
+        if self.composition.is_some() && all.len() > 1 && self.too_soon() {
+            self.defer(rest.to_string(), false);
+            return Ok(());
+        }
         if all.len() > 2 {
             self.compose_tail(&all[..2].iter().collect::<String>())?;
             self.defer(all[1..].iter().collect(), false);
@@ -317,6 +344,7 @@ impl TsfClient<'_> {
                 let composition = unsafe { composition_context.StartComposition(self.ec, &at, self.sink)? };
                 let range = unsafe { composition.GetRange()? };
                 *self.composition = Some(composition);
+                self.stepped();
                 range
             }
         };
@@ -334,6 +362,7 @@ impl TsfClient<'_> {
                     acp.SetExtent((extent.location + extent.length - width) as i32, width as i32)?;
                     composition.ShiftStart(self.ec, &tail)?;
                 }
+                self.stepped();
                 let given: String = chars[..chars.len() - 1].iter().collect();
                 if let Some(word) = self.imm.as_mut() {
                     word.delivered.push_str(&given);
@@ -367,6 +396,25 @@ impl TsfClient<'_> {
         self.commit_text(&rest)
     }
 
+    /// Whether the character composed began too recently to be handed over
+    /// (`inject::CONTINUE_DELAY`): Tabby (xterm.js) notes where a composition ends only on a
+    /// timer after it changes, and one handed over before that timer ran was lost (claude typed
+    /// fast came out clade).
+    fn too_soon(&self) -> bool {
+        self.composition.is_some()
+            && self
+                .imm
+                .as_ref()
+                .and_then(|w| w.last_step)
+                .is_some_and(|t| t.elapsed() < crate::inject::CONTINUE_DELAY)
+    }
+
+    fn stepped(&mut self) {
+        if let Some(word) = self.imm.as_mut() {
+            word.last_step = Some(std::time::Instant::now());
+        }
+    }
+
     /// The rest of a change for the next edit, after the marker key comes back. Under Korean
     /// rules the app gets one character at a time, each in place of the one composed, and some
     /// apps keep only as many characters as were composed (Tabby, through xterm.js: 래 changed
@@ -383,23 +431,30 @@ impl TsfClient<'_> {
     /// rest of a commit goes in now (all at once), the rest of what was composed is redone.
     fn settle(&mut self) -> Result<()> {
         let Some(word) = self.imm.as_mut() else { return Ok(()) };
-        match word.pending.take() {
-            Some(p) if p.erase == 0 && p.commit => {
-                word.delivered.clear();
-                self.commit_at_once(&p.text)
-            }
-            Some(p) if p.erase == 0 => Ok(()),
-            other => {
-                word.pending = other;
-                Ok(())
-            }
+        if matches!(word.pending, Some(Pending { erase: 0, commit: false, .. })) {
+            word.pending = None;
         }
+        Ok(())
+    }
+
+    /// A commit is still going in: what comes now waits behind it.
+    fn committing(&self) -> bool {
+        self.imm.as_ref().is_some_and(|w| matches!(w.pending, Some(Pending { erase: 0, commit: true, .. })))
+    }
+
+    fn queue(&mut self, item: Queued) {
+        let Some(word) = self.imm.as_mut() else { return };
+        // A commit ends the word that was showing; a new display replaces the last one.
+        if matches!(word.queue.last(), Some(Queued::Show(_))) {
+            word.queue.pop();
+        }
+        word.queue.push(item);
     }
 
     /// Types `text` after the word: behind the rest of a commit still to go in, if any.
     pub fn type_after(&mut self, text: &str) -> Result<()> {
-        if let Some(Pending { erase: 0, text: rest, commit: true }) = self.imm.as_mut().and_then(|w| w.pending.as_mut()) {
-            rest.push_str(text);
+        if self.committing() {
+            self.queue(Queued::Commit(text.to_string()));
             return Ok(());
         }
         self.commit_text(text)
@@ -410,6 +465,10 @@ impl TsfClient<'_> {
     pub fn commit_text(&mut self, text: &str) -> Result<()> {
         if self.imm.is_some() {
             let all: Vec<char> = text.chars().collect();
+            if (self.composition.is_some() || !all.is_empty()) && self.too_soon() {
+                self.defer(text.to_string(), true);
+                return Ok(());
+            }
             if all.len() > 1 {
                 if self.composition.is_none() {
                     self.compose_tail(&all[0].to_string())?;
@@ -451,7 +510,26 @@ impl TsfClient<'_> {
 
     /// Finishes a change the app erased characters for: the composed rest, or the word's end.
     pub fn finish_pending(&mut self, pending: Pending) -> Result<()> {
-        if pending.commit { self.commit_text(&pending.text) } else { self.compose_tail(&pending.text) }
+        if pending.commit {
+            self.commit_text(&pending.text)?;
+        } else {
+            self.compose_tail(&pending.text)?;
+        }
+        // Then what waited behind a commit, as far as it goes now.
+        while !self.committing() {
+            let Some(word) = self.imm.as_mut() else { break };
+            if word.queue.is_empty() {
+                break;
+            }
+            match word.queue.remove(0) {
+                Queued::Commit(text) => {
+                    word.delivered.clear();
+                    self.commit_text(&text)?;
+                }
+                Queued::Show(text) => self.imm_set(&text)?,
+            }
+        }
+        Ok(())
     }
 }
 

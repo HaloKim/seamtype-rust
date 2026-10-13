@@ -513,7 +513,15 @@ impl TextService_Impl {
     fn after_edit(&self) -> bool {
         let Ok(mut state) = self.state.try_borrow_mut() else { return false };
         let pass = std::mem::take(&mut state.imm.pass_key);
-        let erase = state.imm.pending.as_ref().map(|p| p.erase);
+        let mut erase = state.imm.pending.as_ref().map(|p| p.erase);
+        if erase == Some(0) {
+            // One marker on its way at a time: two would bring the steps closer together.
+            if state.imm.continuing {
+                erase = None;
+            } else {
+                state.imm.continuing = true;
+            }
+        }
         if erase.is_some() {
             state.replacing = Some(Instant::now());
         }
@@ -585,6 +593,7 @@ impl TextService_Impl {
     fn finish_replacement(&self, context: &ITfContext) {
         let pending = self.state.try_borrow_mut().ok().and_then(|mut s| {
             s.replacing = None;
+            s.imm.continuing = false;
             if !s.eaten.contains(&inject::MARKER) {
                 s.eaten.push(inject::MARKER);
             }
