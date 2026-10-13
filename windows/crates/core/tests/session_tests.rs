@@ -840,3 +840,15 @@ fn early_delivery_app_esc_and_delete_go_by_the_screen() {
     type_keys(&mut session, &mut field, "dkssud an⌫");
     assert_eq!(field.text(), "안녕 ㅁ");
 }
+
+/// A clean Korean loanword after an English word commits as Korean, though its start showed as
+/// English on the way (flema): 리드미, not flemal. Also where the app delivers early.
+#[test]
+fn clean_korean_loanword_after_english_commits_korean() {
+    let mut field = FakeTextField::new();
+    type_keys(&mut mixed_session(false), &mut field, "fork flemal ");
+    assert_eq!(field.text(), "fork 리드미 ");
+    let mut field = FakeTextField::early_delivery();
+    type_keys(&mut mixed_session(false), &mut field, "fork flemal ");
+    assert_eq!(field.text(), "fork 리드미 ");
+}

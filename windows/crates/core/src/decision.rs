@@ -188,10 +188,11 @@ pub struct HeuristicEngine {
     pub english_word_protection: f64,
     /// Score floor for Korean that reads cleanly (three or more syllables, all of them common,
     /// no stray jamo) when the keys aren't an English word: loanwords missing from the word
-    /// lists (리드미 typed as flemal, even after an English word). On the top 10,000 words of each
-    /// language in context (tools/eval_context.py) -2.0 took wrong words from 488 to 456 with no
-    /// English word turned; of the top 50,000 English words 35 rare names (chandi, quantico) turn
-    /// Korean.
+    /// lists (리드미 typed as flemal, even after an English word). High enough for the word to
+    /// win clearly (over 0.7, `PREVIEW_FLIP_CONFIDENCE`), since flema shows as English on the way.
+    /// On the top 10,000 words of each language in context (tools/eval_context.py) -1.6 took wrong
+    /// words from 488 to 456 with no English word turned; of the top 50,000 English words about 40
+    /// rare names (chandi, quantico) turn Korean.
     pub clean_korean_floor: Option<f64>,
 }
 
@@ -212,7 +213,7 @@ impl HeuristicEngine {
             switch_bias_factor: 0.25,
             korean_known_floor: (-1.4, -2.0),
             english_word_protection: 1.0,
-            clean_korean_floor: Some(-2.0),
+            clean_korean_floor: Some(-1.6),
         }
     }
 }
