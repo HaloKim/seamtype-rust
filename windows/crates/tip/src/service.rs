@@ -66,7 +66,15 @@ pub struct State {
     /// say it is Seamtype's, the next Backspaces are taken as these, for a moment after sending.
     expected_backspaces: u32,
     expected_since: Option<Instant>,
+    /// Focus left a field with a word in progress, which is kept in case focus comes straight
+    /// back (see `FOCUS_BOUNCE`).
+    away: Option<(ITfDocumentMgr, Instant)>,
 }
+
+/// Some pages move focus off their text field and back while it is edited (Excel on the web
+/// does, on every Backspace, which Seamtype also sends to fix a word): focus that goes to nothing
+/// that takes text and returns to the same field this soon leaves the word being typed alone.
+const FOCUS_BOUNCE: Duration = Duration::from_millis(300);
 
 /// How long Backspaces Seamtype sent may take to come back.
 const REPLACING_WINDOW: Duration = Duration::from_millis(1500);
@@ -199,6 +207,15 @@ fn compartment_on(manager: &ITfCompartmentMgr, guid: &GUID) -> bool {
 fn keyboard_disabled(context: &ITfContext) -> bool {
     let Ok(manager) = context.cast::<ITfCompartmentMgr>() else { return false };
     compartment_on(&manager, &GUID_COMPARTMENT_KEYBOARD_DISABLED) || compartment_on(&manager, &GUID_COMPARTMENT_EMPTYCONTEXT)
+}
+
+/// Focus is on nothing that takes text: no field, or one with the keyboard off (Chrome moves
+/// focus to such a document while a page has no text field focused).
+fn takes_no_text(document: Option<&ITfDocumentMgr>) -> bool {
+    match document.and_then(|d| unsafe { d.GetTop() }.ok()) {
+        Some(context) => keyboard_disabled(&context),
+        None => true,
+    }
 }
 
 /// A compartment of the thread manager itself (where the keyboard's open state and input mode
@@ -907,8 +924,23 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
         })
     }
 
-    fn OnSetFocus(&self, _focus: Ref<ITfDocumentMgr>, _previous: Ref<ITfDocumentMgr>) -> Result<()> {
+    fn OnSetFocus(&self, focus: Ref<ITfDocumentMgr>, previous: Ref<ITfDocumentMgr>) -> Result<()> {
         crate::guard(|| {
+            let away = self.state.try_borrow_mut().ok().and_then(|mut state| state.away.take());
+            if let Some((left, at)) = &away {
+                if at.elapsed() < FOCUS_BOUNCE && focus.as_ref().is_some_and(|f| same_object(f, left)) {
+                    crate::log!("focus came back, the word goes on");
+                    return Ok(());
+                }
+            }
+            if let (None, Some(previous), Ok(mut state)) = (&away, previous.as_ref(), self.state.try_borrow_mut()) {
+                let in_progress = state.session.as_ref().is_some_and(|s| s.is_composing()) || !state.imm.delivered.is_empty();
+                if in_progress && takes_no_text(focus.as_ref()) && focus.as_ref().is_none_or(|f| !same_object(f, previous)) {
+                    crate::log!("focus moved away, the word waits");
+                    state.away = Some((previous.clone(), Instant::now()));
+                    return Ok(());
+                }
+            }
             crate::log!("focus changed");
             self.finish_composition();
             self.open_keyboard("focus");

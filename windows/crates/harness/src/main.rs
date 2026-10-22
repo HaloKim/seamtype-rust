@@ -236,6 +236,21 @@ impl Harness {
         }
     }
 
+    /// Focus goes to a document that takes no text and straight back (Chrome does this while
+    /// Excel on the web is edited).
+    fn bounce_focus(&self, document: &Document) -> Result<()> {
+        unsafe {
+            let nothing = self.thread_mgr.CreateDocumentMgr()?;
+            for (to, from) in [(&nothing, &document.manager), (&document.manager, &nothing)] {
+                self.thread_mgr.SetFocus(to)?;
+                if let Route::Direct { focus, .. } = &self.route {
+                    focus.OnSetFocus(to, from)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
     fn set_shift(&self, shift: bool) {
         let mut state = [0u8; 256];
         unsafe {
@@ -596,6 +611,17 @@ fn main() -> ExitCode {
         );
     }
     FAST.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // Excel on the web moves focus off the cell and back on every Backspace: the word goes on
+    // (rod, English, then rodl, 개이, erased and typed again: only the last letter was left).
+    if let Ok(document) = harness.document_with(true) {
+        for ch in "rodls ".chars() {
+            harness.press(&document, ch);
+            let _ = harness.bounce_focus(&document);
+        }
+        let text = document.store.text();
+        report.check("imm: focus off and back", text == "개인 ", format!("got {text:?}"));
+    }
 
     // The start of a Korean word that could be English (an, ant → 무슨) isn't handed to the app
     // while the engine is unsure, so nothing has to be erased again.
