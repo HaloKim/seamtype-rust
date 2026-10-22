@@ -31,7 +31,7 @@ use windows::Win32::UI::TextServices::{
 };
 use windows_core::{implement, ComObject, Error, IUnknown, IUnknownImpl, Interface, Ref, Result, BOOL, GUID};
 
-use crate::client::{variant_as_i32, variant_i4, ImmWord, TsfClient};
+use crate::client::{variant_as_i32, variant_i4, ImmWord, Pending, TsfClient};
 use crate::display::{AttributeEnum, InputAttribute};
 use crate::langbar::LangBarButton;
 use crate::inject::Injection;
@@ -620,7 +620,19 @@ impl TextService_Impl {
             if !s.eaten.contains(&inject::MARKER) {
                 s.eaten.push(inject::MARKER);
             }
-            s.imm.pending.take()
+            let pending = s.imm.pending.take()?;
+            if pending.erase > 0 && s.imm.delivered.is_empty() {
+                // The app erased all it had of the word, which may leave its field empty: Excel on
+                // the web then ends the composition and resets the cell, and what came straight
+                // after was lost. The word goes on a moment later.
+                crate::log!("imm: the word's characters are erased, it goes on after a moment");
+                s.imm.pending = Some(Pending { erase: 0, ..pending });
+                s.imm.markers += 1;
+                s.replacing = Some(Instant::now());
+                inject::send(Injection::Continue);
+                return None;
+            }
+            Some(pending)
         });
         if let Some(pending) = pending {
             crate::log!("imm: erased, the word goes on");

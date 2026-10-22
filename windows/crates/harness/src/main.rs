@@ -623,6 +623,16 @@ fn main() -> ExitCode {
         report.check("imm: focus off and back", text == "개인 ", format!("got {text:?}"));
     }
 
+    // Excel on the web also resets a cell Backspace empties, and a composition begun straight
+    // after was lost (개인적인 left 적인).
+    for (script, expected) in [("rodls ", "개인 "), ("rodlswjrdls ", "개인적인 ")] {
+        let Ok(document) = harness.document_with(true) else { continue };
+        document.store.resets_when_emptied.set(true);
+        harness.type_script(&document, script);
+        let text = document.store.text();
+        report.check(&format!("imm: field reset when emptied: {script}"), text == expected, format!("got {text:?}"));
+    }
+
     // The start of a Korean word that could be English (an, ant → 무슨) isn't handed to the app
     // while the engine is unsure, so nothing has to be erased again.
     if let Ok(document) = harness.document_with(true) {

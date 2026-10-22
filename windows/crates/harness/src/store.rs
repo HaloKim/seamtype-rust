@@ -46,6 +46,10 @@ pub struct Store {
     received: RefCell<String>,
     /// Characters such an app lost.
     pub lost: Cell<usize>,
+    /// Resets its field a moment after Backspace empties it, as Excel on the web does to a cell:
+    /// a composition begun meanwhile is refused (what it would show is lost).
+    pub resets_when_emptied: Cell<bool>,
+    resetting_until: Cell<Option<std::time::Instant>>,
 }
 
 impl Store {
@@ -63,6 +67,8 @@ impl Store {
             changes: RefCell::new(Vec::new()),
             received: RefCell::new(String::new()),
             lost: Cell::new(0),
+            resets_when_emptied: Cell::new(false),
+            resetting_until: Cell::new(None),
         }
     }
 
@@ -152,6 +158,9 @@ impl Store {
             let (from, to) = if start != end { (start, end) } else if start > 0 { (start - 1, start) } else { return };
             inner.text.drain(from as usize..to as usize);
             inner.selection = (from, from);
+            if inner.text.is_empty() && self.resets_when_emptied.get() {
+                self.resetting_until.set(Some(std::time::Instant::now() + std::time::Duration::from_millis(10)));
+            }
             (TS_TEXTCHANGE { acpStart: from, acpOldEnd: to, acpNewEnd: from }, inner.sink.clone())
         };
         if let Some(sink) = sink {
@@ -407,6 +416,9 @@ impl ITextStoreACP_Impl for Store_Impl {
 
 impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
     fn OnStartComposition(&self, composition: Ref<ITfCompositionView>) -> Result<BOOL> {
+        if self.resetting_until.get().is_some_and(|t| std::time::Instant::now() < t) {
+            return Ok(false.into());
+        }
         self.compositions.set(self.compositions.get() + 1);
         self.born.set(self.locks.get());
         self.settled.set(None);
