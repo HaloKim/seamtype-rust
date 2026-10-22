@@ -436,6 +436,11 @@ static INJECTED: std::sync::Mutex<Vec<seamtype::Injection>> = std::sync::Mutex::
 /// How many times characters the app already had were erased.
 static ERASES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Whether IMM32 apps compose in the app (`imeImmInline` in the run's settings.json).
+fn set_imm_inline(dir: &std::path::Path, on: bool) {
+    let _ = std::fs::write(dir.join("settings.json"), format!("{{\"imeImmInline\": {on}}}\n"));
+}
+
 fn inject(injection: seamtype::Injection) {
     INJECTED.lock().unwrap().push(injection);
 }
@@ -478,6 +483,7 @@ fn main() -> ExitCode {
         args.remove(0);
     }
     seamtype::set_injector(inject);
+    seamtype::set_popup_headless(true);
     let harness = match Harness::new(registered) {
         Ok(h) => h,
         Err(e) => {
@@ -565,72 +571,84 @@ fn main() -> ExitCode {
         ("claude eh ", "claude eh "),
         ("dkssud claude ", "안녕 claude "),
     ];
-    for (script, expected) in imm_scripts {
-        let Ok(document) = harness.document_with(true) else { continue };
-        let mut longest = 0usize;
-        for ch in script.chars() {
-            harness.press(&document, ch);
-            longest = longest.max(document.store.compositions.get().max(0) as usize);
+    // Both ways of typing in an IMM32 app: the word held in Seamtype's window until it ends (the
+    // default), and composed in the app one character at a time (imeImmInline).
+    for inline in [false, true] {
+        set_imm_inline(&dir, inline);
+        let mode = if inline { "imm" } else { "imm held" };
+        for (script, expected) in imm_scripts {
+            // An Esc correction made in both passes would be learned (twice is remembered).
+            if inline && script.contains('⎋') {
+                continue;
+            }
+            let Ok(document) = harness.document_with(true) else { continue };
+            let mut longest = 0usize;
+            for ch in script.chars() {
+                harness.press(&document, ch);
+                longest = longest.max(document.store.compositions.get().max(0) as usize);
+            }
+            // A word still being typed shows in the app, or held in Seamtype's window.
+            let held = seamtype::popup_shown().unwrap_or_default();
+            let text = document.store.text() + &held;
+            let received = document.store.received() + &held;
+            report.check(
+                &format!("{mode}: {script}"),
+                text == *expected && longest <= 1 && received == *expected,
+                format!("got {text:?}, an xterm-like app {received:?}, expected {expected:?}"),
+            );
         }
-        let text = document.store.text();
-        let received = document.store.received();
-        report.check(
-            &format!("imm: {script}"),
-            text == *expected && longest <= 1 && received == *expected,
-            format!("got {text:?}, an xterm-like app {received:?}, expected {expected:?}"),
-        );
-    }
 
-    // Typed faster than Tabby's timers (xterm.js): a character handed over too soon after another
-    // was lost (claude came out clade). Steps wait for the timer, keys or not.
-    FAST.store(true, std::sync::atomic::Ordering::SeqCst);
-    for (script, expected) in [
-        ("claude ", "claude "),
-        ("fork ", "fork "),
-        ("dkssud claude ", "안녕 claude "),
-        ("Hello, World! ", "Hello, World! "),
-        ("dlrjs githubdp commitgkf rjdi.", "이건 github에 commit할 거야."),
-        ("dustpeo ", "연세대 "),
-    ] {
-        let Ok(document) = harness.document_with(true) else { continue };
-        for ch in script.chars() {
-            harness.press_marker_if_due(&document);
-            harness.press(&document, ch);
-            std::thread::sleep(std::time::Duration::from_millis(8));
+        // Typed faster than Tabby's timers (xterm.js): a character handed over too soon after another
+        // was lost (claude came out clade). Steps wait for the timer, keys or not.
+        FAST.store(true, std::sync::atomic::Ordering::SeqCst);
+        for (script, expected) in [
+            ("claude ", "claude "),
+            ("fork ", "fork "),
+            ("dkssud claude ", "안녕 claude "),
+            ("Hello, World! ", "Hello, World! "),
+            ("dlrjs githubdp commitgkf rjdi.", "이건 github에 commit할 거야."),
+            ("dustpeo ", "연세대 "),
+        ] {
+            let Ok(document) = harness.document_with(true) else { continue };
+            for ch in script.chars() {
+                harness.press_marker_if_due(&document);
+                harness.press(&document, ch);
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+            // Then the app catches up and the last steps go in.
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(35));
+                harness.press_marker_if_due(&document);
+            }
+            let (text, received) = (document.store.text(), document.store.received());
+            report.check(
+                &format!("{mode} fast: {script}"),
+                text == expected && received == expected,
+                format!("got {text:?}, an xterm-like app {received:?}, expected {expected:?}"),
+            );
         }
-        // Then the app catches up and the last steps go in.
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(35));
-            harness.press_marker_if_due(&document);
-        }
-        let (text, received) = (document.store.text(), document.store.received());
-        report.check(
-            &format!("imm fast: {script}"),
-            text == expected && received == expected,
-            format!("got {text:?}, an xterm-like app {received:?}, expected {expected:?}"),
-        );
-    }
-    FAST.store(false, std::sync::atomic::Ordering::SeqCst);
+        FAST.store(false, std::sync::atomic::Ordering::SeqCst);
 
-    // Excel on the web moves focus off the cell and back on every Backspace: the word goes on
-    // (rod, English, then rodl, 개이, erased and typed again: only the last letter was left).
-    if let Ok(document) = harness.document_with(true) {
-        for ch in "rodls ".chars() {
-            harness.press(&document, ch);
-            let _ = harness.bounce_focus(&document);
+        // Excel on the web moves focus off the cell and back on every Backspace: the word goes on
+        // (rod, English, then rodl, 개이, erased and typed again: only the last letter was left).
+        if let Ok(document) = harness.document_with(true) {
+            for ch in "rodls ".chars() {
+                harness.press(&document, ch);
+                let _ = harness.bounce_focus(&document);
+            }
+            let text = document.store.text();
+            report.check(&format!("{mode}: focus off and back"), text == "개인 ", format!("got {text:?}"));
         }
-        let text = document.store.text();
-        report.check("imm: focus off and back", text == "개인 ", format!("got {text:?}"));
-    }
 
-    // Excel on the web also resets a cell Backspace empties, and a composition begun straight
-    // after was lost (개인적인 left 적인).
-    for (script, expected) in [("rodls ", "개인 "), ("rodlswjrdls ", "개인적인 ")] {
-        let Ok(document) = harness.document_with(true) else { continue };
-        document.store.resets_when_emptied.set(true);
-        harness.type_script(&document, script);
-        let text = document.store.text();
-        report.check(&format!("imm: field reset when emptied: {script}"), text == expected, format!("got {text:?}"));
+        // Excel on the web also resets a cell Backspace empties, and a composition begun straight
+        // after was lost (개인적인 left 적인).
+        for (script, expected) in [("rodls ", "개인 "), ("rodlswjrdls ", "개인적인 ")] {
+            let Ok(document) = harness.document_with(true) else { continue };
+            document.store.resets_when_emptied.set(true);
+            harness.type_script(&document, script);
+            let text = document.store.text();
+            report.check(&format!("{mode}: field reset when emptied: {script}"), text == expected, format!("got {text:?}"));
+        }
     }
 
     // The start of a Korean word that could be English (an, ant → 무슨) isn't handed to the app
@@ -641,6 +659,33 @@ fn main() -> ExitCode {
         let erased = ERASES.load(std::sync::atomic::Ordering::SeqCst) - before;
         let text = document.store.text();
         report.check("imm: unsure english start waits", text == "안녕 무슨 " && erased == 0, format!("got {text:?}, {erased} erasures"));
+    }
+    set_imm_inline(&dir, false);
+
+    // A held word: the app has nothing of it until it ends, Seamtype's window shows it.
+    if let Ok(document) = harness.document_with(true) {
+        harness.type_script(&document, "dkssud");
+        let (typing, shown) = (document.store.text(), seamtype::popup_shown());
+        harness.type_script(&document, " ");
+        let (text, after) = (document.store.text(), seamtype::popup_shown());
+        report.check(
+            "imm held: the word shows in the window",
+            typing.is_empty() && shown.as_deref() == Some("안녕") && text == "안녕 " && after.is_none(),
+            format!("field {typing:?} window {shown:?} → field {text:?} window {after:?}"),
+        );
+    }
+
+    // Moving to another field puts the held word in the first.
+    if let Ok(first) = harness.document_with(true) {
+        harness.type_script(&first, "dkssud");
+        if let Ok(second) = harness.document_with(true) {
+            harness.type_script(&second, "hello ");
+            report.check(
+                "imm held: focus change puts the word in",
+                first.store.text() == "안녕" && second.store.text() == "hello " && seamtype::popup_shown().is_none(),
+                format!("first {:?}, second {:?}", first.store.text(), second.store.text()),
+            );
+        }
     }
 
     // While a word is composed the field holds a composition (underlined), ended by the commit.

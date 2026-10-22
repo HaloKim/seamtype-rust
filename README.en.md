@@ -56,7 +56,9 @@ powershell -ExecutionPolicy Bypass -File windows\scripts\install.ps1
 
 ## Keys
 
-The word being typed is underlined and shown in the language the input method expects.
+The word being typed is underlined and shown in the language the input method expects. In apps that go
+through IMM32, such as Chrome and Tabby, it shows in a small box under the caret until it ends, and goes in
+whole at Space, punctuation or Return.
 
 | Key | What it does |
 | --- | --- |
@@ -102,17 +104,25 @@ In terminals, `conversionThreshold` 0.97 (Strict) keeps short commands from turn
 ### IMM32 apps (Webex, Tabby and others)
 
 Apps that aren't TSF-aware go through Windows' IMM32 bridge, which applies Korean IME rules to a Korean
-input method: only the last character is composed, and the ones before it go straight to the app. Fixed
-on that path:
+input method: only the last character is composed, and the ones before it go straight to the app. A word
+that changed language mid-way then had its characters erased with Backspace and typed again, and each app
+took that its own way, losing characters (Tabby, Chrome's address bar, Excel on the web).
 
-- Letters typed twice (`ddkkssss…`), the app ending compositions at once, lost keys, lost spaces.
-- When a word changes language mid-way, characters already handed over are erased with Backspace and typed
-  again. Showing an unsure English start as one Hangul character cut that from 6.4 to 2.3 times per 100
-  words (a 20,000-word Korean chat simulation, same committed text).
-- Tabby (xterm.js) notes where a composition ends only on a timer, and dropped characters handed over in
-  quick succession (`fork` → `frk`, `claude` → `clade`). Characters now go in one at a time, giving the app
-  time (30 ms) to catch up.
-- The test harness emulates such apps (the one-character rule, the late timer, fast typing).
+- **By default the word waits in a box.** While it is typed the app gets nothing; the word shows in
+  Seamtype's box under the caret and goes in whole when it ends. Nothing is ever erased, so none of those
+  problems can happen.
+- Turning off "Show the Word Being Typed in a Box" in the menu (`"imeImmInline": true` in `settings.json`)
+  composes in the app as before. Fixed on that path:
+
+  - Letters typed twice (`ddkkssss…`), the app ending compositions at once, lost keys, lost spaces.
+  - Showing an unsure English start as one Hangul character cut erasing and retyping from 6.4 to 2.3 times
+    per 100 words (a 20,000-word Korean chat simulation, same committed text).
+  - Tabby (xterm.js) notes where a composition ends only on a timer, and dropped characters handed over in
+    quick succession (`fork` → `frk`, `claude` → `clade`). Characters go in one at a time, giving the app
+    time (30 ms) to catch up.
+  - Excel on the web moves focus away on every Backspace, and resets a cell left empty (`개인적인` → `적인`).
+- The test harness emulates such apps (the one-character rule, the late timer, fast typing, focus moving
+  away, a cell reset) and checks both ways.
 
 ### Better decisions
 

@@ -11,6 +11,12 @@
 //! composed one character at a time (`ImmWord`): the characters the app already has are never
 //! sent again, a Backspace over one of them is left to the app, and when they have to change
 //! (Esc to another reading, a split decided late) the app erases them first.
+//!
+//! Erasing is where IMM32 apps went wrong, each its own way (Tabby lost characters, Chrome took
+//! Backspaces out of order, Excel on the web reset an emptied cell). So by default such an app
+//! gets nothing of a word while it is typed: the word shows in Seamtype's window at the caret
+//! (popup.rs) and goes in whole when it ends, never to be erased. `imeImmInline` brings back
+//! composing in the app.
 
 use std::mem::ManuallyDrop;
 
@@ -37,6 +43,8 @@ pub struct TsfClient<'a> {
     pub imm: Option<&'a mut ImmWord>,
     /// The key being handled is Backspace.
     pub backspace: bool,
+    /// An IMM32 app's word shows in Seamtype's window until it ends (see the module comment).
+    pub hold: bool,
 }
 
 /// What an IMM32 app already has of the word being composed (see the module comment).
@@ -58,6 +66,8 @@ pub struct ImmWord {
     pub markers: u32,
     /// What came while a commit was still going in, in order: it follows the commit.
     pub queue: Vec<Queued>,
+    /// The word shown in Seamtype's window, held back from the app until it ends.
+    pub held: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -191,6 +201,9 @@ impl TsfClient<'_> {
     }
 
     fn try_set_marked_text(&mut self, text: &str) -> Result<()> {
+        if self.hold {
+            return self.hold_set(text);
+        }
         if self.imm.is_some() {
             self.settle()?;
             if self.committing() {
@@ -233,6 +246,10 @@ impl TsfClient<'_> {
     }
 
     fn try_insert_text(&mut self, text: &str, replacing: Option<TextRange>) -> Result<()> {
+        if replacing.is_none() && self.hold {
+            self.hold_set("")?;
+            return self.commit_at_once(text);
+        }
         if replacing.is_none() && self.imm.is_some() {
             self.settle()?;
             if self.committing() {
@@ -264,6 +281,38 @@ impl TsfClient<'_> {
         let insert: ITfInsertAtSelection = self.context.cast()?;
         let range = unsafe { insert.InsertTextAtSelection(self.ec, Default::default(), &utf16(text))? };
         self.caret_after(&range)
+    }
+}
+
+// IMM32 apps, a word held in Seamtype's window until it ends.
+impl TsfClient<'_> {
+    fn hold_set(&mut self, text: &str) -> Result<()> {
+        let starts = self.imm.as_ref().is_some_and(|w| w.held.is_none());
+        if let Some(word) = self.imm.as_mut() {
+            word.held = (!text.is_empty()).then(|| text.to_string());
+        }
+        if text.is_empty() {
+            crate::popup::hide();
+        } else {
+            let caret = self.caret_rect();
+            if starts {
+                crate::log!("imm: a word held in the window (caret from the document: {})", caret.is_some());
+            }
+            crate::popup::show(text, caret);
+        }
+        Ok(())
+    }
+
+    /// Where the caret is on the screen, as the document reports it.
+    fn caret_rect(&self) -> Option<windows::Win32::Foundation::RECT> {
+        unsafe {
+            let view = self.context.GetActiveView().ok()?;
+            let range = self.insert_point().ok()?;
+            let mut rect = windows::Win32::Foundation::RECT::default();
+            let mut clipped = windows_core::BOOL(0);
+            view.GetTextExt(self.ec, &range, &mut rect, &mut clipped).ok()?;
+            (rect.bottom > rect.top).then_some(rect)
+        }
     }
 }
 
@@ -463,9 +512,9 @@ impl TsfClient<'_> {
     }
 
     /// Puts `text` in as typed: through a composition ended at once, which the bridge passes on;
-    /// in an IMM32 app one character per edit.
+    /// in an IMM32 app composing in the app, one character per edit.
     pub fn commit_text(&mut self, text: &str) -> Result<()> {
-        if self.imm.is_some() {
+        if self.imm.is_some() && !self.hold {
             let all: Vec<char> = text.chars().collect();
             if (self.composition.is_some() || !all.is_empty()) && self.too_soon() {
                 self.defer(text.to_string(), true);
@@ -537,7 +586,7 @@ impl TsfClient<'_> {
 
 impl TextClient for TsfClient<'_> {
     fn delivers_all_but_last(&self) -> bool {
-        self.is_imm()
+        self.is_imm() && !self.hold
     }
 
     fn set_marked_text(&mut self, text: &str) {

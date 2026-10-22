@@ -34,11 +34,14 @@ pub struct ImeOptions {
     pub caret: Caret,
     /// Underline the composition through a display attribute (`imeAttribute`).
     pub attribute: bool,
+    /// In IMM32 apps, compose in the app as typed rather than in Seamtype's window at the caret
+    /// (`imeImmInline`; see client.rs).
+    pub imm_inline: bool,
 }
 
 impl Default for ImeOptions {
     fn default() -> Self {
-        ImeOptions { caret: Caret::End, attribute: true }
+        ImeOptions { caret: Caret::End, attribute: true, imm_inline: false }
     }
 }
 
@@ -56,6 +59,9 @@ fn load_ime_options() -> ImeOptions {
         };
         if let Some(on) = value.get("imeAttribute").and_then(|v| v.as_bool()) {
             options.attribute = on;
+        }
+        if let Some(on) = value.get("imeImmInline").and_then(|v| v.as_bool()) {
+            options.imm_inline = on;
         }
     }
     options
@@ -171,6 +177,32 @@ impl Runtime {
         }
         self.settings_stamp = stamp(&Settings::store_path());
         self.apply(new);
+    }
+
+    /// Saves whether IMM32 apps compose in the app (`imeImmInline`) and applies it.
+    pub fn set_imm_inline(&mut self, on: bool) {
+        let Some(path) = Settings::store_path() else { return };
+        let mut object: serde_json::Map<String, serde_json::Value> = std::fs::read(&path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default();
+        object.insert("imeImmInline".into(), serde_json::Value::Bool(on));
+        let sorted: std::collections::BTreeMap<_, _> = object.into_iter().collect();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match serde_json::to_vec_pretty(&sorted) {
+            Ok(mut data) => {
+                data.push(b'\n');
+                if let Err(e) = std::fs::write(&path, data) {
+                    crate::log!("could not save settings: {e}");
+                }
+            }
+            Err(e) => crate::log!("could not save settings: {e}"),
+        }
+        self.settings_stamp = stamp(&Settings::store_path());
+        self.ime.imm_inline = on;
+        self.generation += 1;
     }
 
     /// Saves a change to one app's behavior and applies it.

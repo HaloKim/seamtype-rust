@@ -69,6 +69,8 @@ pub struct State {
     /// Focus left a field with a word in progress, which is kept in case focus comes straight
     /// back (see `FOCUS_BOUNCE`).
     away: Option<(ITfDocumentMgr, Instant)>,
+    /// The field a word held in Seamtype's window was typed in (an IMM32 app's, see client.rs).
+    held_in: Option<ITfContext>,
 }
 
 /// Some pages move focus off their text field and back while it is edited (Excel on the web
@@ -317,9 +319,11 @@ impl TextService_Impl {
                     ime,
                     imm: if transitory { Some(&mut imm) } else { None },
                     backspace,
+                    hold: transitory && !ime.imm_inline,
                 };
                 f(state, &mut client)
             };
+            state.held_in = imm.held.is_some().then(|| ctx.clone());
             state.composition = composition;
             state.imm = imm;
             *result.borrow_mut() = Some(value);
@@ -339,9 +343,10 @@ impl TextService_Impl {
     }
 
     /// The document the composition is in, if there is one.
+    /// The field of the word being typed: its composition's, or where a held word goes.
     fn composition_context(&self) -> Option<ITfContext> {
         let state = self.state.try_borrow().ok()?;
-        let composition = state.composition.as_ref()?;
+        let Some(composition) = state.composition.as_ref() else { return state.held_in.clone() };
         unsafe { composition.GetRange().ok()?.GetContext().ok() }
     }
 
@@ -360,8 +365,10 @@ impl TextService_Impl {
                 // Characters an IMM32 app has can't be fixed once focus moved on.
                 let mut state = self.state.borrow_mut();
                 state.imm = ImmWord::default();
+                state.held_in = None;
                 state.replacing = None;
                 state.expected_backspaces = 0;
+                crate::popup::hide();
                 return;
             }
         }
@@ -373,7 +380,9 @@ impl TextService_Impl {
         }
         state.composition = None;
         state.imm = ImmWord::default();
+        state.held_in = None;
         state.replacing = None;
+        crate::popup::hide();
     }
 
     fn classify(&self, context: &ITfContext, vk: u32) -> KeyAction {
@@ -763,6 +772,7 @@ impl TextService_Impl {
     fn deactivate(&self) -> Result<()> {
         crate::diagnose::remove_hooks();
         self.finish_composition();
+        crate::popup::destroy();
         let mut state = self.state.borrow_mut();
         if let Some(thread_mgr) = state.thread_mgr.take() {
             unsafe {

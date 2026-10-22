@@ -15,6 +15,7 @@ mod edit;
 mod inject;
 mod keys;
 mod langbar;
+mod popup;
 pub mod log;
 pub mod register;
 pub mod runtime;
@@ -34,6 +35,7 @@ use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_core::{implement, IUnknown, Interface, Ref, BOOL, GUID, HRESULT};
 
 pub use inject::{set_injector, Injection, CONTINUE_DELAY};
+pub use popup::{set_headless as set_popup_headless, shown as popup_shown};
 pub use service::TextService;
 
 /// The COM class of the text service.

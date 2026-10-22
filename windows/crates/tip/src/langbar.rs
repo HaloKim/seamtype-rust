@@ -44,6 +44,7 @@ enum Action {
     ToggleEscape,
     UseDefault,
     ToggleJapanese,
+    ToggleWordWindow,
     UndoLearned,
     ForgetAll,
     OpenFolder,
@@ -165,6 +166,7 @@ impl LangBarButton {
             items.push(Item::separator());
         }
         items.push(Item::new(s.japanese, Action::ToggleJapanese).checked(runtime.settings.japanese));
+        items.push(Item::new(s.word_window, Action::ToggleWordWindow).checked(!runtime.ime.imm_inline));
         items.push(Item::separator());
         if let Some(keys) = runtime.engine.last_learned() {
             items.push(Item::new(strings::fill(s.undo_learned, &keys), Action::UndoLearned));
@@ -189,6 +191,11 @@ impl LangBarButton {
             Action::ToggleEscape => runtime::get().update_policy(&app, |p| p.escape_to_app = !p.escape_to_app),
             Action::UseDefault => runtime::get().remove_policy(&app),
             Action::ToggleJapanese => runtime::get().update(|s| s.japanese = !s.japanese),
+            Action::ToggleWordWindow => {
+                let mut runtime = runtime::get();
+                let inline = runtime.ime.imm_inline;
+                runtime.set_imm_inline(!inline);
+            }
             Action::UndoLearned => runtime::get().undo_last_learned(),
             Action::ForgetAll => {
                 let s = strings::get();
