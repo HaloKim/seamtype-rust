@@ -933,15 +933,23 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
                     return Ok(());
                 }
             }
+            let mut why = String::new();
             if let (None, Some(previous), Ok(mut state)) = (&away, previous.as_ref(), self.state.try_borrow_mut()) {
                 let in_progress = state.session.as_ref().is_some_and(|s| s.is_composing()) || !state.imm.delivered.is_empty();
-                if in_progress && takes_no_text(focus.as_ref()) && focus.as_ref().is_none_or(|f| !same_object(f, previous)) {
+                let no_text = takes_no_text(focus.as_ref());
+                let same = focus.as_ref().is_some_and(|f| same_object(f, previous));
+                if in_progress && no_text && !same {
                     crate::log!("focus moved away, the word waits");
                     state.away = Some((previous.clone(), Instant::now()));
                     return Ok(());
                 }
+                if in_progress {
+                    why = format!(" (word in progress; to a field that takes text: {}, same field: {same})", !no_text);
+                }
+            } else if away.is_some() {
+                why = " (focus didn't come back in time)".into();
             }
-            crate::log!("focus changed");
+            crate::log!("focus changed{why}");
             self.finish_composition();
             self.open_keyboard("focus");
             runtime::get().refresh(true);
